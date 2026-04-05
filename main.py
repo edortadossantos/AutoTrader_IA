@@ -41,6 +41,7 @@ from modules.market_analyzer import get_current_prices
 from modules.reporter import print_dashboard, console
 from modules.portfolio import save_daily_snapshot
 from modules.risk_manager import risk_check_portfolio
+from modules.market_hours import is_market_open, market_status, next_market_open_utc
 
 
 _last_actions: list[dict] = []
@@ -65,13 +66,35 @@ def news_cycle():
 def daily_snapshot():
     current_prices = get_current_prices(WATCHLIST)
     risk = risk_check_portfolio(current_prices)
-    from modules.portfolio import get_stats
-    stats = get_stats()
     from config import INITIAL_CAPITAL
     equity = risk["equity"]
-    daily_pnl = equity - INITIAL_CAPITAL  # simplificado; en prod calcularías delta diario
+    daily_pnl = equity - INITIAL_CAPITAL
     save_daily_snapshot(equity, daily_pnl)
     logger.info(f"Snapshot diario guardado. Equity=${equity:.2f}")
+
+
+def _sleep_until_market_open():
+    """Duerme hasta la próxima apertura NYSE. Consume ~0% CPU."""
+    next_open = next_market_open_utc()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    seconds = max(0, (next_open - now).total_seconds())
+    hours = seconds / 3600
+    mkt = market_status()
+    logger.info(
+        f"Mercado {mkt['status']} ({mkt['detail']}). "
+        f"Durmiendo {hours:.1f}h hasta proxima apertura..."
+    )
+    console.print(
+        f"[dim]Mercado cerrado — bot en reposo {hours:.1f}h. "
+        f"El dashboard sigue disponible en http://localhost:5000[/dim]"
+    )
+    # Dormir en bloques de 60s para responder a Ctrl+C
+    while seconds > 0:
+        chunk = min(60, seconds)
+        time.sleep(chunk)
+        seconds -= chunk
+        if is_market_open():
+            break
 
 
 def run_once():
@@ -82,23 +105,31 @@ def run_once():
 
 def run_bot():
     init_db()
-    console.print("[bold cyan]AutoTrader IA iniciado en modo PAPER TRADING[/bold cyan]")
-    console.print(f"Intervalo de mercado: {SCAN_INTERVAL_MINUTES} min | Noticias: {NEWS_INTERVAL_MINUTES} min\n")
+    console.print("[bold cyan]AutoTrader IA — PAPER TRADING[/bold cyan]")
+    console.print(f"Escaneo cada {SCAN_INTERVAL_MINUTES} min (solo en horario NYSE) | Noticias cada {NEWS_INTERVAL_MINUTES} min\n")
 
-    # Primera ejecución inmediata
-    update_news_cache()
-    trading_cycle()
-
-    # Programar tareas periódicas
     schedule.every(SCAN_INTERVAL_MINUTES).minutes.do(trading_cycle)
     schedule.every(NEWS_INTERVAL_MINUTES).minutes.do(news_cycle)
-    schedule.every().day.at("21:05").do(daily_snapshot)  # snapshot al cierre de NYSE (UTC)
+    schedule.every().day.at("21:05").do(daily_snapshot)  # snapshot al cierre NYSE (UTC)
+
+    # Primera carga de noticias siempre
+    update_news_cache()
 
     logger.info("Bot activo. Ctrl+C para detener.")
     try:
         while True:
-            schedule.run_pending()
-            time.sleep(30)
+            if is_market_open():
+                schedule.run_pending()
+                time.sleep(30)
+            else:
+                schedule.clear()  # cancelar jobs pendientes antes de dormir
+                _sleep_until_market_open()
+                # Reconfigurar schedule al despertar
+                schedule.every(SCAN_INTERVAL_MINUTES).minutes.do(trading_cycle)
+                schedule.every(NEWS_INTERVAL_MINUTES).minutes.do(news_cycle)
+                schedule.every().day.at("21:05").do(daily_snapshot)
+                update_news_cache()
+                trading_cycle()  # ciclo inmediato al abrir mercado
     except KeyboardInterrupt:
         logger.info("Bot detenido por el usuario.")
         console.print("\n[yellow]Bot detenido.[/yellow]")

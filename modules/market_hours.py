@@ -80,6 +80,30 @@ def is_market_open(utc_dt: datetime = None) -> bool:
     return OPEN_ET <= current_time < CLOSE_ET
 
 
+def next_market_open_utc() -> datetime:
+    """Retorna el UTC datetime de la próxima apertura NYSE."""
+    from datetime import timedelta
+    now_utc = datetime.utcnow()
+    et = utc_to_et(now_utc)
+
+    # Candidato: apertura de hoy a las 9:30
+    candidate = et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+    # Si ya pasó (o mercado está abierto), empezar desde mañana
+    if et >= candidate:
+        candidate += timedelta(days=1)
+
+    # Saltar fines de semana y festivos
+    for _ in range(10):
+        if candidate.weekday() < 5 and candidate.date() not in NYSE_HOLIDAYS:
+            break
+        candidate += timedelta(days=1)
+
+    # ET → UTC (revertir el offset que aplicó utc_to_et)
+    offset = -4 if _is_dst(candidate) else -5
+    return candidate + timedelta(hours=-offset)  # ET + |offset| = UTC
+
+
 def market_status(utc_dt: datetime = None) -> dict:
     """Retorna estado detallado del mercado."""
     if utc_dt is None:
