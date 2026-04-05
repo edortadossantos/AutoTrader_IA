@@ -2,20 +2,21 @@
 title AutoTrader IA — Bot
 cd /d "%~dp0"
 
-echo ========================================
-echo  AutoTrader IA — Arrancando bot...
-echo ========================================
+REM Si ya hay una instancia de main.py corriendo, no arrancar otra
+tasklist /FI "IMAGENAME eq python.exe" /FI "WINDOWTITLE eq AutoTrader-Bot*" 2>nul | find "python.exe" >nul
+if %ERRORLEVEL% EQU 0 (
+    echo Bot ya en ejecucion. No se arranca una segunda instancia.
+    exit /b 0
+)
 
-REM Activar entorno virtual si existe
+REM Comprobacion alternativa por nombre de ventana
+tasklist /FI "WINDOWTITLE eq AutoTrader-Bot" 2>nul | find "python.exe" >nul
+if %ERRORLEVEL% EQU 0 (
+    exit /b 0
+)
+
 if exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
 )
 
-REM Arrancar el bot en segundo plano (minimizado)
 start "AutoTrader-Bot" /MIN python main.py
-
-echo Bot arrancado en segundo plano.
-echo Para verlo: busca la ventana "AutoTrader-Bot" en la barra de tareas.
-echo Para pararlo: ejecuta parar_bot.bat
-echo.
-pause
