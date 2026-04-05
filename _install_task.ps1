@@ -1,13 +1,14 @@
-param([string]$BatPath)
+param([string]$BotBat, [string]$DashBat)
 
-$taskName = "AutoTraderIA_Bot"
+function Register-AutoTraderTask {
+    param([string]$TaskName, [string]$BatPath, [string]$DelayBot)
 
-$xml = @"
+    $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
     <LogonTrigger>
-      <Delay>PT1M</Delay>
+      <Delay>$DelayBot</Delay>
       <UserId>$env:USERNAME</UserId>
     </LogonTrigger>
     <SessionStateChangeTrigger>
@@ -34,7 +35,11 @@ $xml = @"
   </Actions>
 </Task>
 "@
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force | Out-Null
+}
 
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $taskName -Xml $xml -Force | Out-Null
+Register-AutoTraderTask -TaskName "AutoTraderIA_Bot"       -BatPath $BotBat  -DelayBot "PT1M"
+Register-AutoTraderTask -TaskName "AutoTraderIA_Dashboard" -BatPath $DashBat -DelayBot "PT1M30S"
+
 Write-Host "TASK_OK"

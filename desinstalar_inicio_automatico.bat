@@ -1,16 +1,10 @@
 @echo off
 title AutoTrader IA — Desinstalar inicio automatico
 
-set "TASK_NAME=AutoTraderIA_Bot"
+echo Eliminando tareas del Programador de Tareas...
+schtasks /Delete /TN "AutoTraderIA_Bot" /F >nul 2>&1
+schtasks /Delete /TN "AutoTraderIA_Dashboard" /F >nul 2>&1
 
-echo Eliminando tarea del Programador de Tareas...
-schtasks /Delete /TN "%TASK_NAME%" /F
-
-if %ERRORLEVEL% EQU 0 (
-    echo [OK] Tarea eliminada. El bot ya no arrancara automaticamente.
-) else (
-    echo [INFO] La tarea no existia o ya estaba eliminada.
-)
-
+echo [OK] Tareas eliminadas. Bot y dashboard ya no arrancan automaticamente.
 echo.
 pause
