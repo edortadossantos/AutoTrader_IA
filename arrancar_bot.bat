@@ -7,8 +7,8 @@ echo  AutoTrader IA — Arrancando bot...
 echo ========================================
 
 REM Activar entorno virtual si existe
-if exist ".venv\Scripts\activate.bat" (
-    call .venv\Scripts\activate.bat
+if exist "venv\Scripts\activate.bat" (
+    call venv\Scripts\activate.bat
 )
 
 REM Arrancar el bot en segundo plano (minimizado)
