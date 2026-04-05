@@ -31,6 +31,12 @@ def get_usd_eur_rate() -> float:
         return _cache["rate"] or 0.92  # fallback aproximado
 
 
+def eur_to_usd(eur_amount: float) -> float:
+    """Convierte EUR a USD usando el tipo de cambio actual."""
+    rate = get_usd_eur_rate()  # EUR por 1 USD
+    return eur_amount / rate if rate else eur_amount
+
+
 def to_display(usd_amount: float) -> float:
     """Convierte USD al importe en la moneda configurada."""
     if DISPLAY_CURRENCY == "USD":

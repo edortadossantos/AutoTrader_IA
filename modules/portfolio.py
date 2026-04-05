@@ -4,7 +4,7 @@ Gestión de cartera paper-trading con persistencia en SQLite.
 import sqlite3
 import json
 from datetime import datetime
-from config import DB_PATH, INITIAL_CAPITAL
+from config import DB_PATH, INITIAL_CAPITAL, DISPLAY_CURRENCY
 
 
 def _conn():
@@ -54,9 +54,16 @@ def init_db():
         """)
         # Inicializar cuenta si no existe
         if cur.execute("SELECT COUNT(*) FROM account").fetchone()[0] == 0:
+            # INITIAL_CAPITAL está en la moneda de visualización (EUR o USD)
+            # Las posiciones se valoran en USD → convertir si hace falta
+            if DISPLAY_CURRENCY == "EUR":
+                from modules.currency import eur_to_usd
+                initial_usd = eur_to_usd(INITIAL_CAPITAL)
+            else:
+                initial_usd = INITIAL_CAPITAL
             cur.execute(
                 "INSERT INTO account (id, cash, initial_capital, created_at) VALUES (1, ?, ?, ?)",
-                (INITIAL_CAPITAL, INITIAL_CAPITAL, datetime.utcnow().isoformat())
+                (initial_usd, initial_usd, datetime.utcnow().isoformat())
             )
         con.commit()
 
@@ -150,6 +157,13 @@ def get_trade_history(limit: int = 50) -> list[dict]:
         ).fetchall()
     return [{"ticker": r[0], "side": r[1], "qty": r[2], "price": r[3],
              "pnl": r[4], "reason": r[5], "executed_at": r[6]} for r in rows]
+
+
+def get_initial_capital_usd() -> float:
+    """Capital inicial en USD tal como fue registrado en la DB."""
+    with _conn() as con:
+        row = con.execute("SELECT initial_capital FROM account WHERE id=1").fetchone()
+        return row[0] if row else INITIAL_CAPITAL
 
 
 def get_stats() -> dict:

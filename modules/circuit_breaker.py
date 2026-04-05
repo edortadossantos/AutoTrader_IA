@@ -14,7 +14,6 @@ import sqlite3
 import logging
 from datetime import datetime, date
 from config import (
-    INITIAL_CAPITAL,
     DRAWDOWN_WARN_PCT,
     DRAWDOWN_REDUCE_PCT,
     DRAWDOWN_HALT_PCT,
@@ -79,7 +78,9 @@ def check(current_equity: float) -> dict:
     """
     _init_day_equity(current_equity)
 
-    drawdown_pct = (INITIAL_CAPITAL - current_equity) / INITIAL_CAPITAL
+    from modules.portfolio import get_initial_capital_usd
+    initial_capital = get_initial_capital_usd()
+    drawdown_pct = (initial_capital - current_equity) / initial_capital if initial_capital else 0.0
     daily_open = _state["day_open_equity"] or current_equity
     daily_loss_pct = (daily_open - current_equity) / daily_open if daily_open > 0 else 0
     consecutive_losses = _get_consecutive_losses()

@@ -145,7 +145,8 @@ def analyze_ticker(ticker: str) -> dict | None:
         signals.append(("SMA downtrend", -0.7))
 
     # ── Volume confirmation ───────────────────────────────────────
-    vol_ratio = float(last["Volume"]) / float(last["vol_sma"]) if last["vol_sma"] > 0 else 1
+    vol_sma = float(last["vol_sma"])
+    vol_ratio = float(last["Volume"]) / vol_sma if vol_sma > 0 else 1.0
     vol_boost = min(vol_ratio, 2.0) / 2.0  # normalizado 0-1
 
     # Score compuesto normalizado a [-1, 1]
