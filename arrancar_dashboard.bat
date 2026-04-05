@@ -2,8 +2,8 @@
 title AutoTrader-Dashboard
 cd /d "%~dp0"
 
-REM Si ya está corriendo, no arrancar otra instancia
-tasklist /FI "WINDOWTITLE eq AutoTrader-Dashboard" 2>nul | find "python.exe" >nul
+REM Si el puerto 5000 ya está escuchando, ya hay una instancia corriendo
+netstat -ano | find "0.0.0.0:5000" >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     exit /b 0
 )

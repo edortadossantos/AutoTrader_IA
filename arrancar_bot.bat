@@ -1,17 +1,9 @@
 @echo off
-title AutoTrader IA — Bot
+title AutoTrader-Bot
 cd /d "%~dp0"
 
-REM Si ya hay una instancia de main.py corriendo, no arrancar otra
-tasklist /FI "IMAGENAME eq python.exe" /FI "WINDOWTITLE eq AutoTrader-Bot*" 2>nul | find "python.exe" >nul
-if %ERRORLEVEL% EQU 0 (
-    echo Bot ya en ejecucion. No se arranca una segunda instancia.
-    exit /b 0
-)
-
-REM Comprobacion alternativa por nombre de ventana
-tasklist /FI "WINDOWTITLE eq AutoTrader-Bot" 2>nul | find "python.exe" >nul
-if %ERRORLEVEL% EQU 0 (
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0_check_bot_running.ps1" >nul 2>&1
+if %ERRORLEVEL% EQU 1 (
     exit /b 0
 )
 

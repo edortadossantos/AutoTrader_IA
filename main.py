@@ -8,6 +8,7 @@ Uso:
 """
 import sys
 import io
+import os
 import time
 import logging
 import schedule
@@ -103,7 +104,21 @@ def run_once():
     trading_cycle()
 
 
+_PID_FILE = Path("bot.pid")
+
+
+def _write_pid():
+    _PID_FILE.write_text(str(os.getpid()))
+
+
+def _remove_pid():
+    _PID_FILE.unlink(missing_ok=True)
+
+
 def run_bot():
+    import atexit
+    _write_pid()
+    atexit.register(_remove_pid)
     init_db()
     console.print("[bold cyan]AutoTrader IA — PAPER TRADING[/bold cyan]")
     console.print(f"Escaneo cada {SCAN_INTERVAL_MINUTES} min (solo en horario NYSE) | Noticias cada {NEWS_INTERVAL_MINUTES} min\n")

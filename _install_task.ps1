@@ -19,7 +19,7 @@ function Register-AutoTraderTask {
   <Principals>
     <Principal id="Author">
       <UserId>$env:USERNAME</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
+      <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
   <Settings>

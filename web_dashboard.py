@@ -9,30 +9,39 @@ import sqlite3
 import webbrowser
 import threading
 from datetime import datetime
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, send_from_directory
 
 from config import INITIAL_CAPITAL, WATCHLIST, DISPLAY_CURRENCY
 from config import DRAWDOWN_WARN_PCT, DRAWDOWN_REDUCE_PCT, DRAWDOWN_HALT_PCT
-from modules.portfolio import get_positions, get_trade_history, get_stats, init_db
+from modules.portfolio import get_positions, get_trade_history, get_stats, init_db, get_initial_capital_usd
 from modules.market_analyzer import get_current_prices
 from modules.risk_manager import risk_check_portfolio
 from modules.market_hours import market_status
 from modules import circuit_breaker
 from modules.currency import get_usd_eur_rate, currency_symbol, to_display
 
-app = Flask(__name__)
+import os as _os
+app = Flask(__name__, static_folder=_os.path.join(_os.path.dirname(__file__), "static"))
 
 HTML = """
 <!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>AutoTrader IA</title>
+<!-- PWA / iPhone home screen -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AutoTrader">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/icon.png">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0d1117">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; }
+body { font-family: 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9;
+       padding-bottom: env(safe-area-inset-bottom); }
 header { background: #161b22; padding: 14px 28px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #30363d; }
 header h1 { font-size: 1.3rem; color: #58a6ff; }
 .badge { font-size: 0.7rem; font-weight: bold; padding: 3px 10px; border-radius: 12px; }
@@ -82,6 +91,24 @@ tr:hover td { background: #1c2128; }
 .cb-gauge { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
 .cb-dot { width: 10px; height: 10px; border-radius: 50%; }
 .limits-info { font-size: 0.7rem; color: #8b949e; line-height: 1.6; }
+
+/* ── Responsivo móvil ── */
+@media (max-width: 700px) {
+  header { flex-wrap: wrap; padding: 10px 14px; gap: 8px; }
+  header h1 { font-size: 1.1rem; }
+  .header-right { width: 100%; justify-content: space-between; }
+  #mkt-detail { display: none; }
+  .grid { grid-template-columns: repeat(2, 1fr); padding: 12px 12px 0; gap: 10px; }
+  .grid .card:last-child { grid-column: span 2; }
+  .card .value { font-size: 1.25rem; }
+  .watchlist { padding: 10px 12px 0; gap: 6px; }
+  .chip { font-size: 0.72rem; padding: 3px 9px; }
+  .charts { grid-template-columns: 1fr; padding: 10px 12px 0; }
+  .charts-3 { grid-template-columns: 1fr; padding: 10px 12px 0; }
+  .tables { grid-template-columns: 1fr; padding: 10px 12px 14px; }
+  table { font-size: 0.75rem; }
+  th, td { padding: 5px 6px; }
+}
 </style>
 </head>
 <body>
@@ -352,12 +379,13 @@ setInterval(loadData, 30000);
 def index():
     sym = currency_symbol()
     rate = get_usd_eur_rate()
-    initial_display = to_display(INITIAL_CAPITAL)
+    initial_usd = get_initial_capital_usd()
+    initial_display = round(to_display(initial_usd), 2)
     rate_info = f"1 USD = {rate:.4f} EUR" if DISPLAY_CURRENCY == "EUR" else "Moneda: USD"
     return render_template_string(
         HTML,
-        initial_usd=INITIAL_CAPITAL,
-        initial_display=round(initial_display, 2),
+        initial_usd=round(initial_usd, 2),
+        initial_display=initial_display,
         sym=sym,
         rate=round(rate, 6),
         currency=DISPLAY_CURRENCY,
@@ -404,6 +432,76 @@ def api_data():
         "market": mkt,
         "circuit_breaker": cb,
         "rate_info": f"1 USD = {rate:.4f} EUR" if DISPLAY_CURRENCY == "EUR" else "USD",
+    })
+
+
+@app.route("/iconos")
+def icon_picker():
+    options = [
+        ("opt1", "Minimalista", "Fondo verde oscuro, flecha arriba"),
+        ("opt2", "Candlestick", "Velas japonesas verde/rojo"),
+        ("opt3", "Letra A", "Gradiente azul-morado, letra grande"),
+        ("opt4", "Badge circular", "Círculo con borde verde y curva"),
+        ("opt5", "Neon", "Fondo negro, línea neón verde"),
+    ]
+    cards = "".join(f"""
+    <div style="background:#161b22;border:2px solid #30363d;border-radius:16px;padding:16px;text-align:center">
+      <img src="/static/{k}_512.png" style="width:120px;height:120px;border-radius:22px;box-shadow:0 4px 20px #0004">
+      <div style="color:#fff;font-weight:700;margin:10px 0 4px">{title}</div>
+      <div style="color:#8b949e;font-size:.78rem;margin-bottom:12px">{desc}</div>
+      <a href="/set-icon/{k}" style="background:#238636;color:#fff;padding:8px 20px;border-radius:8px;text-decoration:none;font-size:.85rem">Usar este</a>
+    </div>""" for k, title, desc in options)
+    return f"""<!DOCTYPE html><html><head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Elige tu icono</title>
+    <style>body{{background:#0d1117;color:#c9d1d9;font-family:sans-serif;padding:20px;margin:0}}
+    h2{{color:#58a6ff;margin-bottom:16px}}
+    .grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}
+    @media(min-width:600px){{.grid{{grid-template-columns:repeat(3,1fr)}}}}</style>
+    </head><body>
+    <a href="/" style="color:#58a6ff;text-decoration:none;font-size:.85rem">&larr; Volver</a>
+    <h2 style="margin-top:12px">Elige el icono</h2>
+    <div class="grid">{cards}</div>
+    </body></html>"""
+
+
+@app.route("/set-icon/<name>")
+def set_icon(name):
+    import shutil, os
+    allowed = {"opt1", "opt2", "opt3", "opt4", "opt5"}
+    if name not in allowed:
+        return "Invalid", 400
+    src = f"static/{name}_512.png"
+    src180 = f"static/{name}.png"
+    if os.path.exists(src):
+        shutil.copy(src, "static/icon_512.png")
+        shutil.copy(src180, "static/icon.png")
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{{background:#0d1117;color:#c9d1d9;font-family:sans-serif;padding:30px;text-align:center}}</style>
+    </head><body>
+    <div style="font-size:3rem">✅</div>
+    <h2 style="color:#3fb950;margin:12px 0">Icono actualizado</h2>
+    <p style="color:#8b949e">Borra el atajo antiguo del inicio y vuelve a añadirlo desde Safari.</p>
+    <br><a href="/iconos" style="color:#58a6ff">← Volver a opciones</a>
+    &nbsp;&nbsp;<a href="/" style="color:#58a6ff">Ir al dashboard</a>
+    </body></html>"""
+
+
+@app.route("/manifest.json")
+def manifest():
+    return jsonify({
+        "name": "AutoTrader IA",
+        "short_name": "AutoTrader",
+        "description": "Paper trading dashboard",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0d1117",
+        "theme_color": "#0d1117",
+        "icons": [
+            {"src": "/static/icon.png", "sizes": "180x180", "type": "image/png"},
+            {"src": "/static/icon_512.png", "sizes": "512x512", "type": "image/png"},
+        ]
     })
 
 
