@@ -413,6 +413,33 @@ def reset_halt():
     return jsonify({"ok": True})
 
 
+@app.route("/logs")
+def view_logs():
+    from pathlib import Path
+    log_path = Path("logs/autotrader.log")
+    if not log_path.exists():
+        lines = ["(sin logs todavia)"]
+    else:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-200:]  # últimas 200 líneas
+    lines_html = "".join(
+        f'<span style="color:{"#f85149" if "[ERROR]" in l or "[CRITICAL]" in l else "#f0a030" if "[WARNING]" in l else "#adbac7"}">{l}</span>'
+        for l in lines
+    )
+    html = f"""<!DOCTYPE html><html><head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>AutoTrader Logs</title>
+    <style>body{{background:#1c2128;color:#adbac7;font-family:monospace;font-size:12px;padding:10px;margin:0}}
+    pre{{white-space:pre-wrap;word-break:break-all}}
+    a{{color:#388bfd;text-decoration:none;display:block;margin-bottom:10px}}</style>
+    <meta http-equiv="refresh" content="30">
+    </head><body>
+    <a href="/">&larr; Volver al dashboard</a>
+    <pre>{lines_html}</pre>
+    </body></html>"""
+    return html
+
+
 if __name__ == "__main__":
     from pathlib import Path
     Path("data").mkdir(exist_ok=True)
