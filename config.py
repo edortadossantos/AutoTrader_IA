@@ -8,6 +8,10 @@ INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", 10000))
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")  # solo "paper" por ahora
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
+# ── Moneda de visualización ─────────────────────────────────────
+# "USD" = dólares nativos | "EUR" = convierte usando tipo de cambio en tiempo real
+DISPLAY_CURRENCY = os.getenv("DISPLAY_CURRENCY", "EUR")
+
 # ── Universo de activos a monitorear ────────────────────────────
 WATCHLIST = [
     # Tech
@@ -18,12 +22,28 @@ WATCHLIST = [
     "JPM", "BAC",
 ]
 
-# ── Gestión de riesgo ───────────────────────────────────────────
+# ── Gestión de riesgo básica ────────────────────────────────────
 MAX_POSITION_PCT = 0.10       # máx 10% del capital por posición
 STOP_LOSS_PCT = 0.05          # stop loss 5%
 TAKE_PROFIT_PCT = 0.12        # take profit 12%
 MAX_OPEN_POSITIONS = 5        # máx posiciones abiertas simultáneas
 MIN_SIGNAL_SCORE = 0.60       # score mínimo para operar (0-1)
+
+# ── Circuit breakers (protección del capital) ───────────────────
+# Nivel 1 — AVISO: alerta en dashboard y log, pero sigue operando
+DRAWDOWN_WARN_PCT    = 0.10   # aviso si el capital cae un 10%
+
+# Nivel 2 — REDUCCION: cierra posiciones abiertas, no abre nuevas
+DRAWDOWN_REDUCE_PCT  = 0.20   # reduce exposición si cae un 20%
+
+# Nivel 3 — HALT TOTAL: para TODO el trading automáticamente
+DRAWDOWN_HALT_PCT    = 0.50   # bloqueo total si el capital cae un 50%
+
+# Pérdida máxima en un solo día (% sobre equity de apertura del día)
+DAILY_LOSS_LIMIT_PCT = 0.05   # para el bot si pierde más del 5% en un día
+
+# Máximo de operaciones perdedoras consecutivas antes de pausar
+MAX_CONSECUTIVE_LOSSES = 4
 
 # ── Parámetros técnicos ─────────────────────────────────────────
 RSI_OVERSOLD = 35
@@ -38,8 +58,8 @@ SMA_SHORT = 20
 SMA_LONG = 50
 
 # ── Scheduler ──────────────────────────────────────────────────
-MARKET_OPEN_HOUR = 15   # UTC (NYSE abre a las 14:30 UTC / 9:30 ET)
-MARKET_CLOSE_HOUR = 21  # UTC (NYSE cierra a las 21:00 UTC / 16:00 ET)
+# NYSE: abre 9:30 ET = 13:30 UTC (verano) / 14:30 UTC (invierno)
+# Usamos UTC; el bot detecta horario real con holidays incluidos
 SCAN_INTERVAL_MINUTES = 15   # cada cuántos minutos escanea el mercado
 NEWS_INTERVAL_MINUTES = 30   # cada cuántos minutos actualiza noticias
 
