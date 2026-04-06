@@ -12,3 +12,6 @@ textblob>=0.18.0
 matplotlib>=3.8.0
 seaborn>=0.13.0
 flask>=3.0.0
+praw>=7.7.0
+lxml>=5.0.0
+beautifulsoup4>=4.12.0

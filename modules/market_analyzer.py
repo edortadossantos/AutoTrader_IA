@@ -46,11 +46,19 @@ def get_current_price(ticker: str) -> float | None:
 
 
 def get_current_prices(tickers: list[str]) -> dict[str, float]:
-    prices = {}
-    for t in tickers:
-        p = get_current_price(t)
-        if p:
-            prices[t] = p
+    """Descarga precios en paralelo (hasta 12 hilos) para reducir latencia."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    prices: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=min(12, len(tickers) or 1)) as ex:
+        futures = {ex.submit(get_current_price, t): t for t in tickers}
+        for fut in as_completed(futures):
+            ticker = futures[fut]
+            try:
+                p = fut.result()
+                if p:
+                    prices[ticker] = p
+            except Exception:
+                pass
     return prices
 
 

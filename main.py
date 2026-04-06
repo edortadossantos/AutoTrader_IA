@@ -2,9 +2,14 @@
 AutoTrader IA — Punto de entrada principal.
 
 Uso:
-    python main.py           # modo bot continuo (24/7 paper trading)
+    python main.py           # modo bot continuo (24/7 multi-mercado)
     python main.py --once    # ejecutar un ciclo y salir
     python main.py --report  # mostrar dashboard y salir
+
+Mercados activos:
+  • US Stocks/ETFs   → NYSE 9:30-16:00 ET (L-V)
+  • Crypto (BTC/ETH/SOL) → 24/7 — el bot NUNCA duerme por crypto
+  • Commodities futuros  → casi 24h (CME, pausa 1h/día)
 """
 import sys
 import io
@@ -19,7 +24,6 @@ from pathlib import Path
 Path("logs").mkdir(exist_ok=True)
 Path("data").mkdir(exist_ok=True)
 
-# Forzar UTF-8 en consola Windows
 stdout_handler = logging.StreamHandler(
     io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     if hasattr(sys.stdout, "buffer") else sys.stdout
@@ -35,33 +39,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-from config import SCAN_INTERVAL_MINUTES, NEWS_INTERVAL_MINUTES, WATCHLIST
+from config import (
+    SCAN_INTERVAL_MINUTES, CRYPTO_SCAN_INTERVAL_MIN,
+    NEWS_INTERVAL_MINUTES, PRO_SIGNALS_INTERVAL_MIN,
+    WATCHLIST, CRYPTO,
+)
 from modules.portfolio import init_db
-from modules.trader import scan_and_trade, update_news_cache
+from modules.trader import scan_all_markets, scan_crypto_only, update_news_cache, update_pro_cache
 from modules.market_analyzer import get_current_prices
 from modules.reporter import print_dashboard, console
 from modules.portfolio import save_daily_snapshot
 from modules.risk_manager import risk_check_portfolio
 from modules.market_hours import is_market_open, market_status, next_market_open_utc
-
+from modules import telegram_notifier as tg
 
 _last_actions: list[dict] = []
+_last_regime: str = ""
 
 
-def trading_cycle():
-    global _last_actions
+# ── Ciclos programados ───────────────────────────────────────────
+
+def trading_cycle_all():
+    """Escaneo completo: todos los activos con mercado abierto."""
+    global _last_actions, _last_regime
     logger.info("=" * 60)
-    logger.info("INICIO DE CICLO DE TRADING")
-    actions = scan_and_trade()
+    logger.info("CICLO COMPLETO — Stocks + ETFs + Crypto + Commodities")
+    actions = scan_all_markets()
     _last_actions = actions
-
     current_prices = get_current_prices(WATCHLIST)
+    print_dashboard(current_prices, actions)
+    # Detectar cambio de régimen de mercado
+    try:
+        from modules.market_regime import get_market_regime
+        reg = get_market_regime()
+        if _last_regime and reg["regime"] != _last_regime:
+            tg.notify_regime_change(_last_regime, reg["regime"], reg["detail"])
+        _last_regime = reg["regime"]
+    except Exception:
+        pass
+
+
+def trading_cycle_crypto():
+    """Ciclo solo crypto (cuando NYSE está cerrado)."""
+    global _last_actions
+    logger.info("-" * 40)
+    logger.info("CICLO CRYPTO (NYSE cerrado)")
+    actions = scan_crypto_only()
+    _last_actions = actions
+    current_prices = get_current_prices(CRYPTO)
     print_dashboard(current_prices, actions)
 
 
 def news_cycle():
-    logger.info("Actualizando noticias...")
     update_news_cache()
+
+
+def pro_cycle():
+    update_pro_cache()
 
 
 def daily_snapshot():
@@ -74,77 +108,102 @@ def daily_snapshot():
     logger.info(f"Snapshot diario guardado. Equity=${equity:.2f}")
 
 
-def _sleep_until_market_open():
-    """Duerme hasta la próxima apertura NYSE. Consume ~0% CPU."""
-    next_open = next_market_open_utc()
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    seconds = max(0, (next_open - now).total_seconds())
-    hours = seconds / 3600
-    mkt = market_status()
-    logger.info(
-        f"Mercado {mkt['status']} ({mkt['detail']}). "
-        f"Durmiendo {hours:.1f}h hasta proxima apertura..."
-    )
-    console.print(
-        f"[dim]Mercado cerrado — bot en reposo {hours:.1f}h. "
-        f"El dashboard sigue disponible en http://localhost:5000[/dim]"
-    )
-    # Dormir en bloques de 60s para responder a Ctrl+C
-    while seconds > 0:
-        chunk = min(60, seconds)
-        time.sleep(chunk)
-        seconds -= chunk
-        if is_market_open():
-            break
+# ── Helpers ──────────────────────────────────────────────────────
 
+def _setup_schedule_nyse_open():
+    """Jobs para cuando NYSE está abierto (todos los mercados)."""
+    schedule.every(SCAN_INTERVAL_MINUTES).minutes.do(trading_cycle_all)
+    schedule.every(NEWS_INTERVAL_MINUTES).minutes.do(news_cycle)
+    schedule.every(PRO_SIGNALS_INTERVAL_MIN).minutes.do(pro_cycle)
+    schedule.every().day.at("21:05").do(daily_snapshot)
+
+
+def _setup_schedule_nyse_closed():
+    """Jobs para cuando NYSE está cerrado (solo crypto + commodities)."""
+    schedule.every(CRYPTO_SCAN_INTERVAL_MIN).minutes.do(trading_cycle_crypto)
+    schedule.every(NEWS_INTERVAL_MINUTES).minutes.do(news_cycle)
+    schedule.every().day.at("21:05").do(daily_snapshot)
+
+
+def _wait_for_next_event() -> str:
+    """
+    Espera en bucle eficiente hasta que cambia el estado del mercado.
+    Retorna 'nyse_open' o 'nyse_closed' según el cambio detectado.
+    """
+    was_open = is_market_open()
+    while True:
+        time.sleep(30)
+        now_open = is_market_open()
+        schedule.run_pending()
+        if now_open != was_open:
+            return "nyse_open" if now_open else "nyse_closed"
+
+
+# ── Modos de ejecución ───────────────────────────────────────────
 
 def run_once():
     init_db()
     update_news_cache()
-    trading_cycle()
-
-
-_PID_FILE = Path("bot.pid")
-
-
-def _write_pid():
-    _PID_FILE.write_text(str(os.getpid()))
-
-
-def _remove_pid():
-    _PID_FILE.unlink(missing_ok=True)
+    update_pro_cache()
+    trading_cycle_all()
 
 
 def run_bot():
     import atexit
-    _write_pid()
-    atexit.register(_remove_pid)
+    _PID_FILE = Path("bot.pid")
+    _PID_FILE.write_text(str(os.getpid()))
+    atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
+
     init_db()
-    console.print("[bold cyan]AutoTrader IA — PAPER TRADING[/bold cyan]")
-    console.print(f"Escaneo cada {SCAN_INTERVAL_MINUTES} min (solo en horario NYSE) | Noticias cada {NEWS_INTERVAL_MINUTES} min\n")
+    mkt = market_status()
 
-    schedule.every(SCAN_INTERVAL_MINUTES).minutes.do(trading_cycle)
-    schedule.every(NEWS_INTERVAL_MINUTES).minutes.do(news_cycle)
-    schedule.every().day.at("21:05").do(daily_snapshot)  # snapshot al cierre NYSE (UTC)
+    console.print("[bold cyan]AutoTrader IA — MULTI-MARKET PAPER TRADING[/bold cyan]")
+    console.print(
+        f"Mercados: US Stocks (NYSE), Crypto 24/7, Commodities CME\n"
+        f"NYSE ahora: [{'green' if mkt['open'] else 'yellow'}]{mkt['status']}[/] — {mkt['detail']}\n"
+        f"Crypto: [green]SIEMPRE ACTIVO[/green]\n"
+    )
 
-    # Primera carga de noticias siempre
+    # Carga inicial de datos
     update_news_cache()
+    update_pro_cache()
 
-    logger.info("Bot activo. Ctrl+C para detener.")
+    # Notificar arranque por Telegram
+    try:
+        from modules.risk_manager import risk_check_portfolio
+        _cp = get_current_prices(CRYPTO)
+        _eq = risk_check_portfolio(_cp)["equity"]
+        tg.notify_startup(_eq, mode="paper")
+    except Exception:
+        pass
+
+    logger.info("Bot multi-mercado activo. Ctrl+C para detener.")
+
     try:
         while True:
-            if is_market_open():
-                schedule.run_pending()
-                time.sleep(30)
+            nyse_open = is_market_open()
+            schedule.clear()
+
+            if nyse_open:
+                logger.info("NYSE ABIERTO — activando ciclo completo (stocks + crypto + commodities)")
+                _setup_schedule_nyse_open()
+                trading_cycle_all()   # ciclo inmediato
             else:
-                schedule.clear()  # cancelar jobs pendientes antes de dormir
-                _sleep_until_market_open()
-                # Reconfigurar schedule al despertar
-                schedule.every(SCAN_INTERVAL_MINUTES).minutes.do(trading_cycle)
-                schedule.every(NEWS_INTERVAL_MINUTES).minutes.do(news_cycle)
-                schedule.every().day.at("21:05").do(daily_snapshot)
-                update_news_cache()
-                trading_cycle()  # ciclo inmediato al abrir mercado
+                mkt = market_status()
+                logger.info(
+                    f"NYSE CERRADO ({mkt['detail']}) — "
+                    f"modo crypto-only activado (ciclo cada {CRYPTO_SCAN_INTERVAL_MIN} min)"
+                )
+                console.print(
+                    f"[dim]NYSE cerrado — operando solo crypto/commodities. "
+                    f"Dashboard: http://localhost:5000[/dim]"
+                )
+                _setup_schedule_nyse_closed()
+                trading_cycle_crypto()  # ciclo inmediato
+
+            # Esperar hasta que cambie el estado del mercado
+            _wait_for_next_event()
+
     except KeyboardInterrupt:
         logger.info("Bot detenido por el usuario.")
         console.print("\n[yellow]Bot detenido.[/yellow]")

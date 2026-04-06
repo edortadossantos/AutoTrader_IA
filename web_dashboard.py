@@ -9,16 +9,17 @@ import sqlite3
 import webbrowser
 import threading
 from datetime import datetime
-from flask import Flask, render_template_string, jsonify, send_from_directory
+from flask import Flask, render_template_string, jsonify, send_from_directory, request
 
 from config import INITIAL_CAPITAL, WATCHLIST, DISPLAY_CURRENCY
 from config import DRAWDOWN_WARN_PCT, DRAWDOWN_REDUCE_PCT, DRAWDOWN_HALT_PCT
-from modules.portfolio import get_positions, get_trade_history, get_stats, init_db, get_initial_capital_usd
+from modules.portfolio import get_positions, get_trade_history, get_stats, init_db, get_initial_capital_usd, get_active_cooldowns
 from modules.market_analyzer import get_current_prices
 from modules.risk_manager import risk_check_portfolio
 from modules.market_hours import market_status
 from modules import circuit_breaker
 from modules.currency import get_usd_eur_rate, currency_symbol, to_display
+from modules.market_regime import get_market_regime
 
 import os as _os
 app = Flask(__name__, static_folder=_os.path.join(_os.path.dirname(__file__), "static"))
@@ -42,7 +43,10 @@ HTML = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9;
        padding-bottom: env(safe-area-inset-bottom); }
-header { background: #161b22; padding: 14px 28px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #30363d; }
+header { background: #161b22; padding: 14px 28px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #30363d;
+         padding-top: calc(14px + env(safe-area-inset-top));
+         padding-left: calc(28px + env(safe-area-inset-left));
+         padding-right: calc(28px + env(safe-area-inset-right)); }
 header h1 { font-size: 1.3rem; color: #58a6ff; }
 .badge { font-size: 0.7rem; font-weight: bold; padding: 3px 10px; border-radius: 12px; }
 .badge-paper { background: #f0e080; color: #0d1117; }
@@ -63,7 +67,7 @@ header h1 { font-size: 1.3rem; color: #58a6ff; }
 .cb-2 { display: block !important; background: #2d0000; border-left: 4px solid #f85149; color: #f85149; }
 .cb-3 { display: block !important; background: #f85149; color: #fff; text-align: center; font-size: 1rem; }
 
-.grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; padding: 20px 28px 0; }
+.grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; padding: 20px 28px 0; }
 .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 18px; }
 .card h3 { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
 .card .value { font-size: 1.6rem; font-weight: 700; }
@@ -94,18 +98,22 @@ tr:hover td { background: #1c2128; }
 
 /* ── Responsivo móvil ── */
 @media (max-width: 700px) {
-  header { flex-wrap: wrap; padding: 10px 14px; gap: 8px; }
+  header { flex-wrap: wrap; padding: 10px 14px; gap: 8px;
+           padding-top: calc(10px + env(safe-area-inset-top));
+           padding-left: calc(14px + env(safe-area-inset-left));
+           padding-right: calc(14px + env(safe-area-inset-right)); }
   header h1 { font-size: 1.1rem; }
   .header-right { width: 100%; justify-content: space-between; }
   #mkt-detail { display: none; }
   .grid { grid-template-columns: repeat(2, 1fr); padding: 12px 12px 0; gap: 10px; }
-  .grid .card:last-child { grid-column: span 2; }
+  .grid .card:nth-child(5), .grid .card:nth-child(6) { grid-column: span 1; }
   .card .value { font-size: 1.25rem; }
   .watchlist { padding: 10px 12px 0; gap: 6px; }
   .chip { font-size: 0.72rem; padding: 3px 9px; }
   .charts { grid-template-columns: 1fr; padding: 10px 12px 0; }
   .charts-3 { grid-template-columns: 1fr; padding: 10px 12px 0; }
   .tables { grid-template-columns: 1fr; padding: 10px 12px 14px; }
+  #bottom-row { grid-template-columns: 1fr !important; padding: 0 12px 14px !important; }
   table { font-size: 0.75rem; }
   th, td { padding: 5px 6px; }
 }
@@ -119,6 +127,8 @@ tr:hover td { background: #1c2128; }
   <span class="badge" id="mkt-badge">—</span>
   <span id="mkt-detail" style="font-size:0.78rem;color:#8b949e"></span>
   <div class="header-right">
+    <a href="/backtest" style="color:#58a6ff;font-size:.78rem;text-decoration:none">&#128202; Backtest</a>
+    <a href="/logs" style="color:#8b949e;font-size:.78rem;text-decoration:none">&#128196; Logs</a>
     <span class="timestamp" id="ts">—</span>
     <button class="refresh-btn" onclick="loadData()">&#8635; Actualizar</button>
   </div>
@@ -143,6 +153,12 @@ tr:hover td { background: #1c2128; }
       Reduccion: -{{ reduce_pct }}<br>
       HALT: -{{ halt_pct }}
     </div>
+  </div>
+  <div class="card">
+    <h3>Regimen Mercado</h3>
+    <div class="value" style="font-size:1rem" id="regime-label">—</div>
+    <div class="sub" id="regime-detail">—</div>
+    <div class="sub" id="regime-vix" style="margin-top:4px">—</div>
   </div>
 </div>
 
@@ -182,6 +198,16 @@ tr:hover td { background: #1c2128; }
   <div class="chart-card">
     <h2>&#128196; Ultimas Operaciones</h2>
     <div id="trades-table"></div>
+  </div>
+</div>
+<div style="padding: 0 28px 28px; display:grid; grid-template-columns:1fr 1fr; gap:14px" id="bottom-row">
+  <div class="chart-card">
+    <h2>&#9203; Cooldowns Activos</h2>
+    <div id="cooldowns-table"></div>
+  </div>
+  <div class="chart-card">
+    <h2>&#128270; Screener (ultimos candidatos)</h2>
+    <div id="screener-table"></div>
   </div>
 </div>
 
@@ -312,21 +338,63 @@ function loadData() {
       document.getElementById('signals-chart').innerHTML = '<p class="no-data">Sin senales aun</p>';
     }
 
+    // Régimen de mercado
+    const reg = d.regime;
+    if (reg) {
+      const regColors = { bull: '#3fb950', neutral: '#f0e080', bear: '#f85149' };
+      const regEmoji = { bull: '&#128994; BULL', neutral: '&#128993; NEUTRAL', bear: '&#128308; BEAR' };
+      document.getElementById('regime-label').innerHTML =
+        `<span style="color:${regColors[reg.regime]}">${regEmoji[reg.regime]||reg.regime.toUpperCase()}</span>`;
+      document.getElementById('regime-detail').textContent =
+        `SPY: ${reg.spy_vs_sma200>=0?'+':''}${reg.spy_vs_sma200}% vs SMA200`;
+      document.getElementById('regime-vix').textContent = `VIX=${reg.vix} | mult×${reg.min_score_mult}`;
+    }
+
+    // Cooldowns
+    const coolDiv = document.getElementById('cooldowns-table');
+    if (d.cooldowns && d.cooldowns.length > 0) {
+      coolDiv.innerHTML = `<table><tr><th>Ticker</th><th>Razon</th><th>Bloqueado hasta</th></tr>` +
+        d.cooldowns.map(c => `<tr>
+          <td><strong>${c.ticker}</strong></td>
+          <td style="color:#f0a030">${c.reason}</td>
+          <td style="font-size:.7rem;color:#8b949e">${c.blocked_until.slice(5,16)} UTC</td>
+        </tr>`).join('') + '</table>';
+    } else {
+      coolDiv.innerHTML = '<p class="no-data">Sin cooldowns activos</p>';
+    }
+
+    // Screener
+    const scrDiv = document.getElementById('screener-table');
+    if (d.screener && d.screener.length > 0) {
+      scrDiv.innerHTML = `<table><tr><th>Ticker</th><th>Score</th><th>Vol ratio</th><th>Momentum</th></tr>` +
+        d.screener.map(s => `<tr>
+          <td><strong>${s.ticker}</strong></td>
+          <td style="color:#58a6ff">${(s.score*100).toFixed(0)}</td>
+          <td>${s.vol_ratio ? s.vol_ratio.toFixed(1)+'x' : '—'}</td>
+          <td class="${s.momentum>=0?'green':'red'}">${s.momentum>=0?'+':''}${(s.momentum*100).toFixed(1)}%</td>
+        </tr>`).join('') + '</table>';
+    } else {
+      scrDiv.innerHTML = '<p class="no-data">Screener: sin datos (solo activo con NYSE abierto)</p>';
+    }
+
     // Tabla posiciones
     const posDiv = document.getElementById('positions-table');
     if (d.positions.length > 0) {
       posDiv.innerHTML = `<table><tr>
-        <th>Ticker</th><th>Precio</th><th>Entrada</th><th>PnL</th><th>Stop</th><th>TP</th>
+        <th>Ticker</th><th>Precio</th><th>Entrada</th><th>PnL</th><th>Stop</th><th>TP</th><th>Trail Max</th>
       </tr>` + d.positions.map(p => {
         const curr = d.prices[p.ticker] || p.avg_price;
         const pnl = (curr - p.avg_price) * p.qty;
         const pp = (curr/p.avg_price - 1)*100;
+        const th = p.trailing_high || p.avg_price;
+        const thPct = ((th/p.avg_price)-1)*100;
         return `<tr>
           <td><strong>${p.ticker}</strong></td>
           <td>${fmt(curr)}</td><td>${fmt(p.avg_price)}</td>
           <td class="${cc(pnl)}">${fmt(pnl)} <small>(${pp>=0?'+':''}${pp.toFixed(2)}%)</small></td>
           <td style="color:#f85149">${fmt(p.stop_loss)}</td>
           <td style="color:#3fb950">${fmt(p.take_profit)}</td>
+          <td style="color:#58a6ff">${fmt(th)} <small>(${thPct>=0?'+':''}${thPct.toFixed(1)}%)</small></td>
         </tr>`;
       }).join('') + '</table>';
     } else {
@@ -421,6 +489,26 @@ def api_data():
         "cash": round(risk["cash"], 2),
     })
 
+    # Market regime (cached 30 min, no se bloquea el dashboard)
+    try:
+        regime = get_market_regime()
+    except Exception:
+        regime = None
+
+    # Cooldowns activos
+    cooldowns = get_active_cooldowns()
+
+    # Screener últimos candidatos (desde cache, sin re-descargar)
+    screener = []
+    try:
+        from modules.market_screener import _screener_cache
+        screener = [
+            {**c, "momentum": c.get("pct_1d", 0) / 100}
+            for c in _screener_cache.get("candidates", [])[:15]
+        ]
+    except Exception:
+        pass
+
     return jsonify({
         "equity": round(equity, 2),
         "cash": round(risk["cash"], 2),
@@ -432,6 +520,9 @@ def api_data():
         "market": mkt,
         "circuit_breaker": cb,
         "rate_info": f"1 USD = {rate:.4f} EUR" if DISPLAY_CURRENCY == "EUR" else "USD",
+        "regime": regime,
+        "cooldowns": cooldowns,
+        "screener": screener,
     })
 
 
@@ -509,6 +600,139 @@ def manifest():
 def reset_halt():
     circuit_breaker.reset_halt()
     return jsonify({"ok": True})
+
+
+@app.route("/backtest")
+def backtest_page():
+    return """<!DOCTYPE html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backtester — AutoTrader IA</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',sans-serif;padding:20px}
+h1{color:#58a6ff;margin-bottom:16px;font-size:1.3rem}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+input,select{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 12px;border-radius:6px;font-size:.9rem}
+input{width:160px}
+button{background:#238636;border:none;color:#fff;padding:8px 20px;border-radius:6px;cursor:pointer;font-size:.9rem}
+button:hover{background:#2ea043}
+button:disabled{background:#30363d;cursor:not-allowed}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin:16px 0}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
+.card h3{font-size:.65rem;color:#8b949e;text-transform:uppercase;margin-bottom:4px}
+.card .v{font-size:1.3rem;font-weight:700}
+.green{color:#3fb950}.red{color:#f85149}.blue{color:#58a6ff}.yellow{color:#f0e080}
+.chart-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:14px}
+.chart-card h2{font-size:.78rem;color:#8b949e;text-transform:uppercase;margin-bottom:10px}
+a{color:#58a6ff;text-decoration:none;font-size:.85rem;display:inline-block;margin-bottom:16px}
+#status{color:#8b949e;font-size:.85rem;margin-top:4px}
+@media(max-width:600px){.cards{grid-template-columns:1fr 1fr}}
+</style></head><body>
+<a href="/">&larr; Dashboard</a>
+<h1>&#128202; Backtester — Análisis histórico de la estrategia</h1>
+<div class="row">
+  <input id="ticker" value="AAPL" placeholder="Ticker (AAPL, BTC-USD...)" />
+  <select id="period">
+    <option value="6mo">6 meses</option>
+    <option value="1y" selected>1 año</option>
+    <option value="2y">2 años</option>
+    <option value="5y">5 años</option>
+  </select>
+  <button id="btn" onclick="runBacktest()">&#9654; Ejecutar</button>
+</div>
+<div id="status"></div>
+<div id="results" style="display:none">
+  <div class="cards" id="cards"></div>
+  <div class="chart-card"><h2>&#128200; Equity Curve vs Buy &amp; Hold</h2><div id="eq-chart" style="height:280px"></div></div>
+</div>
+<script>
+const darkLayout = (extra={}) => Object.assign({
+  paper_bgcolor:'#161b22',plot_bgcolor:'#161b22',font:{color:'#c9d1d9',size:11},
+  margin:{t:10,b:40,l:60,r:10},xaxis:{gridcolor:'#21262d'},yaxis:{gridcolor:'#21262d'},showlegend:true
+},extra);
+
+function runBacktest() {
+  const ticker = document.getElementById('ticker').value.trim().toUpperCase();
+  const period = document.getElementById('period').value;
+  const btn = document.getElementById('btn');
+  const st  = document.getElementById('status');
+  if (!ticker) return;
+  btn.disabled = true;
+  btn.textContent = 'Calculando...';
+  st.textContent = 'Descargando datos históricos y ejecutando simulación...';
+  document.getElementById('results').style.display = 'none';
+
+  fetch(`/api/backtest?ticker=${ticker}&period=${period}`)
+    .then(r=>r.json())
+    .then(d => {
+      btn.disabled = false;
+      btn.textContent = '▶ Ejecutar';
+      if (d.error) { st.textContent = '❌ ' + d.error; return; }
+      st.textContent = '';
+      document.getElementById('results').style.display = 'block';
+
+      const ret  = d.total_return_pct;
+      const bh   = d.buy_hold_return;
+      const alpha= (ret - bh).toFixed(1);
+
+      document.getElementById('cards').innerHTML = `
+        <div class="card"><h3>Retorno total</h3><div class="v ${ret>=0?'green':'red'}">${ret>=0?'+':''}${ret}%</div></div>
+        <div class="card"><h3>Buy &amp; Hold</h3><div class="v ${bh>=0?'green':'red'}">${bh>=0?'+':''}${bh}%</div></div>
+        <div class="card"><h3>Alpha vs B&H</h3><div class="v ${alpha>=0?'green':'red'}">${alpha>=0?'+':''}${alpha}%</div></div>
+        <div class="card"><h3>Sharpe ratio</h3><div class="v ${d.sharpe>=1?'green':d.sharpe>=0.5?'yellow':'red'}">${d.sharpe}</div></div>
+        <div class="card"><h3>Max drawdown</h3><div class="v red">${d.max_drawdown_pct}%</div></div>
+        <div class="card"><h3>Win rate</h3><div class="v ${d.win_rate>=0.5?'green':'red'}">${(d.win_rate*100).toFixed(1)}%</div></div>
+        <div class="card"><h3>Operaciones</h3><div class="v blue">${d.total_trades}</div></div>
+        <div class="card"><h3>Profit factor</h3><div class="v ${d.profit_factor>=1?'green':'red'}">${d.profit_factor}</div></div>
+        <div class="card"><h3>Ganancia media</h3><div class="v green">$${d.avg_win}</div></div>
+        <div class="card"><h3>Pérdida media</h3><div class="v red">$${d.avg_loss}</div></div>
+      `;
+
+      // Equity curve
+      const curve = d.equity_curve;
+      const bh_curve = curve.map((p,i) => ({
+        date: p.date,
+        equity: d.initial_capital * (1 + bh/100 * i / curve.length)
+      }));
+      Plotly.newPlot('eq-chart', [
+        { x: curve.map(p=>p.date), y: curve.map(p=>p.equity),
+          type:'scatter', mode:'lines', name:'Estrategia',
+          line:{color:'#58a6ff',width:2}, fill:'tozeroy', fillcolor:'rgba(88,166,255,0.06)' },
+        { x: curve.map(p=>p.date),
+          y: curve.map((_,i)=>d.initial_capital*(1+bh/100*i/curve.length)),
+          type:'scatter', mode:'lines', name:'Buy & Hold',
+          line:{color:'#3fb950',width:1.5,dash:'dash'} },
+        { x: curve.map(p=>p.date), y: curve.map(()=>d.initial_capital),
+          type:'scatter', mode:'lines', name:'Capital inicial',
+          line:{color:'#8b949e',width:1,dash:'dot'} }
+      ], darkLayout({yaxis:{tickprefix:'$'}}), {responsive:true,displayModeBar:false});
+    })
+    .catch(e => {
+      btn.disabled = false;
+      btn.textContent = '▶ Ejecutar';
+      st.textContent = '❌ Error: ' + e.message;
+    });
+}
+document.getElementById('ticker').addEventListener('keydown', e => { if(e.key==='Enter') runBacktest(); });
+</script>
+</body></html>"""
+
+
+@app.route("/api/backtest")
+def api_backtest():
+    from modules.backtester import run_backtest
+    ticker = request.args.get("ticker", "AAPL").upper()
+    period = request.args.get("period", "1y")
+    if period not in ("6mo", "1y", "2y", "5y"):
+        period = "1y"
+    result = run_backtest(ticker, period)
+    # No enviamos la equity_curve completa si es muy larga (>2000 puntos → submuestrear)
+    curve = result.get("equity_curve", [])
+    if len(curve) > 500:
+        step = len(curve) // 500
+        result["equity_curve"] = curve[::step]
+    return jsonify(result)
 
 
 @app.route("/logs")
