@@ -632,7 +632,60 @@ a{color:#58a6ff;text-decoration:none;font-size:.85rem;display:inline-block;margi
 <a href="/">&larr; Dashboard</a>
 <h1>&#128202; Backtester — Análisis histórico de la estrategia</h1>
 <div class="row">
-  <input id="ticker" value="AAPL" placeholder="Ticker (AAPL, BTC-USD...)" />
+  <select id="ticker" style="width:220px">
+    <optgroup label="US Tech">
+      <option value="AAPL">AAPL — Apple</option>
+      <option value="MSFT">MSFT — Microsoft</option>
+      <option value="GOOGL">GOOGL — Alphabet</option>
+      <option value="NVDA">NVDA — NVIDIA</option>
+      <option value="META">META — Meta</option>
+      <option value="AMZN">AMZN — Amazon</option>
+      <option value="TSLA">TSLA — Tesla</option>
+      <option value="AMD">AMD</option>
+      <option value="NFLX">NFLX — Netflix</option>
+      <option value="ORCL">ORCL — Oracle</option>
+    </optgroup>
+    <optgroup label="US Financials">
+      <option value="JPM">JPM — JPMorgan</option>
+      <option value="BAC">BAC — Bank of America</option>
+      <option value="GS">GS — Goldman Sachs</option>
+      <option value="BRK-B">BRK-B — Berkshire</option>
+    </optgroup>
+    <optgroup label="US Energy / Health / Consumer">
+      <option value="XOM">XOM — Exxon</option>
+      <option value="CVX">CVX — Chevron</option>
+      <option value="JNJ">JNJ — J&amp;J</option>
+      <option value="UNH">UNH — UnitedHealth</option>
+      <option value="WMT">WMT — Walmart</option>
+      <option value="HD">HD — Home Depot</option>
+    </optgroup>
+    <optgroup label="ETFs">
+      <option value="SPY">SPY — S&amp;P 500</option>
+      <option value="QQQ">QQQ — Nasdaq 100</option>
+      <option value="IWM">IWM — Russell 2000</option>
+      <option value="XLK">XLK — Tech ETF</option>
+      <option value="XLF">XLF — Financials ETF</option>
+      <option value="XLE">XLE — Energy ETF</option>
+      <option value="XLV">XLV — Health ETF</option>
+      <option value="GLD">GLD — Oro ETF</option>
+      <option value="SLV">SLV — Plata ETF</option>
+      <option value="USO">USO — Petróleo ETF</option>
+    </optgroup>
+    <optgroup label="Crypto (24/7)">
+      <option value="BTC-USD">BTC-USD — Bitcoin</option>
+      <option value="ETH-USD">ETH-USD — Ethereum</option>
+      <option value="SOL-USD">SOL-USD — Solana</option>
+    </optgroup>
+    <optgroup label="Commodities (futuros CME)">
+      <option value="GC=F">GC=F — Oro futuros</option>
+      <option value="CL=F">CL=F — Petróleo WTI</option>
+      <option value="SI=F">SI=F — Plata futuros</option>
+    </optgroup>
+    <optgroup label="Internacional">
+      <option value="EFA">EFA — Mercados desarrollados</option>
+      <option value="EEM">EEM — Mercados emergentes</option>
+    </optgroup>
+  </select>
   <select id="period">
     <option value="6mo">6 meses</option>
     <option value="1y" selected>1 año</option>
@@ -653,7 +706,7 @@ const darkLayout = (extra={}) => Object.assign({
 },extra);
 
 function runBacktest() {
-  const ticker = document.getElementById('ticker').value.trim().toUpperCase();
+  const ticker = document.getElementById('ticker').value;
   const period = document.getElementById('period').value;
   const btn = document.getElementById('btn');
   const st  = document.getElementById('status');
@@ -714,7 +767,7 @@ function runBacktest() {
       st.textContent = '❌ Error: ' + e.message;
     });
 }
-document.getElementById('ticker').addEventListener('keydown', e => { if(e.key==='Enter') runBacktest(); });
+document.getElementById('ticker').addEventListener('change', () => runBacktest());
 </script>
 </body></html>"""
 

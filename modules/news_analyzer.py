@@ -104,7 +104,14 @@ TICKER_KEYWORDS: dict[str, list[str]] = {
                 "Satoshi", "blockchain", "halving", "ETF Bitcoin", "spot Bitcoin ETF"],
     "ETH-USD": ["Ethereum", "ETH", "Ether", "DeFi", "smart contract", "staking",
                 "Layer 2", "EIP", "Vitalik Buterin"],
-    "SOL-USD": ["Solana", "SOL", "Solana blockchain", "SOL price", "Anatoly Yakovenko"],
+    "SOL-USD":  ["Solana", "SOL", "Solana blockchain", "SOL price", "Anatoly Yakovenko"],
+    "BNB-USD":  ["BNB", "Binance", "Binance Coin", "BSC", "Binance Smart Chain", "CZ", "Changpeng Zhao"],
+    "XRP-USD":  ["XRP", "Ripple", "XRP price", "Ripple Labs", "Brad Garlinghouse", "SEC Ripple",
+                 "cross-border payment", "SWIFT alternative"],
+    "AVAX-USD": ["Avalanche", "AVAX", "AVAX price", "Avalanche blockchain", "Emin Gun Sirer",
+                 "subnet", "avalanche DeFi"],
+    "LINK-USD": ["Chainlink", "LINK", "LINK price", "oracle", "smart contract oracle",
+                 "Sergey Nazarov", "decentralized oracle"],
     # ── Commodities ──────────────────────────────────────────────
     "GC=F":  ["gold", "gold price", "gold futures", "safe haven", "XAU", "precious metals",
               "Fed rate", "dollar weakness", "inflation hedge"],
@@ -382,6 +389,43 @@ def fetch_reddit_sentiment(subreddits: str = "wallstreetbets+investing+stocks+op
         return []
 
 
+_fng_cache: dict = {"value": None, "label": None, "updated_at": None}
+
+def fetch_crypto_fear_greed() -> dict:
+    """
+    Crypto Fear & Greed Index de alternative.me (gratuito, sin API key).
+    Retorna valor 0-100 y score normalizado -1.0..+1.0.
+      0-25  = Extreme Fear  → -1.0 .. -0.5
+      25-45 = Fear          → -0.5 .. -0.1
+      45-55 = Neutral       →  0.0
+      55-75 = Greed         → +0.1 .. +0.5
+      75-100 = Extreme Greed→ +0.5 .. +1.0
+    Cacheado 1 hora (el índice se actualiza diariamente).
+    """
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    cached = _fng_cache.get("updated_at")
+    if cached and (now - cached) < timedelta(hours=1) and _fng_cache["value"] is not None:
+        return _fng_cache
+
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=6)
+        data = r.json()["data"][0]
+        value = int(data["value"])
+        label = data["value_classification"]
+
+        # Normalizar 0-100 → -1.0..+1.0 centrado en 50 (neutral)
+        score = round((value - 50) / 50, 4)
+
+        result = {"value": value, "label": label, "score": score, "updated_at": now}
+        _fng_cache.update(result)
+        logger.info(f"Crypto Fear&Greed: {value}/100 ({label}) → score={score:+.3f}")
+        return result
+    except Exception as e:
+        logger.debug(f"Fear&Greed index error: {e}")
+        return {"value": 50, "label": "Neutral", "score": 0.0, "updated_at": now}
+
+
 def fetch_finviz_news(ticker: str) -> list[dict]:
     """
     Scraping de noticias de Finviz para un ticker específico.
@@ -576,7 +620,7 @@ def get_market_sentiment(articles: list[dict]) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_news_analysis() -> dict:
-    logger.info("Actualizando análisis de noticias (RSS + Finnhub + AV + Reddit + Finviz + SEC)...")
+    logger.info("Actualizando análisis de noticias (RSS + Finnhub + AV + Reddit + Finviz + SEC + F&G)...")
 
     # 1. Fuentes globales en paralelo
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -585,6 +629,7 @@ def run_news_analysis() -> dict:
         "fh_mkt": fetch_finnhub_market_news,
         "reddit": fetch_reddit_sentiment,
         "sec":    fetch_sec_edgar_filings,
+        "fng":    fetch_crypto_fear_greed,
     }
     global_results: dict[str, list] = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
@@ -597,11 +642,12 @@ def run_news_analysis() -> dict:
                 logger.debug(f"Global fetch {name}: {e}")
                 global_results[name] = []
 
+    fng = global_results.get("fng") or {"value": 50, "label": "Neutral", "score": 0.0}
     all_articles = _deduplicate(
-        global_results.get("rss", [])
-        + global_results.get("fh_mkt", [])
-        + global_results.get("reddit", [])
-        + global_results.get("sec", [])
+        (global_results.get("rss") or [])
+        + (global_results.get("fh_mkt") or [])
+        + (global_results.get("reddit") or [])
+        + (global_results.get("sec") or [])
     )
     logger.info(f"  Artículos globales (deduplicados): {len(all_articles)}")
 
@@ -639,11 +685,12 @@ def run_news_analysis() -> dict:
     market_sentiment = get_market_sentiment(all_articles)
 
     return {
-        "ticker_news":     results,
-        "market_sentiment": market_sentiment,
-        "total_articles":  len(all_articles),
-        "sources_active":  _active_sources(all_articles),
-        "updated_at":      datetime.utcnow().isoformat(),
+        "ticker_news":        results,
+        "market_sentiment":   market_sentiment,
+        "crypto_fear_greed":  fng,
+        "total_articles":     len(all_articles),
+        "sources_active":     _active_sources(all_articles),
+        "updated_at":         datetime.utcnow().isoformat(),
     }
 
 

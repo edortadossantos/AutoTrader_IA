@@ -1,18 +1,30 @@
 """
 Estrategia combinada: pondera señales técnicas + noticias + señales profesionales + opciones.
 
-Pesos (con opciones disponibles):
-  Técnico         35%  — RSI, MACD, Bollinger, SMA
-  Pro signals     30%  — Analyst consensus, Earnings surprise, Insider buying
-  Noticias RSS    15%  — Sentimiento de 150+ artículos de fuentes premium
-  Macro mercado   10%  — Sentimiento general del mercado
-  Opciones flow   10%  — Flujo inusual de calls/puts (smart money)
+Pesos base (sin señales pro):
+  Técnico      65%  — RSI, MACD crossover, Bollinger, SMA + daily trend + volumen + ADX
+  Noticias     25%  — Sentimiento de 500+ artículos de fuentes premium
+  Mercado      10%  — Sentimiento general del mercado (índice global)
 
-Las señales pro son las que usan fondos e institucionales.
-Si hay riesgo de earnings o evento macro → señal atenuada automáticamente.
+Con señales pro (Finnhub):
+  Técnico      35%
+  Pro signals  30%  — Analyst consensus, Earnings surprise, Insider buying
+  Noticias     15%
+  Mercado      10%
+  Opciones     10%
+
+Mejoras v2:
+  - Block duro si earnings_risk == HIGH (no comprar antes de resultados)
+  - Veto de sentimiento: mercado muy negativo bloquea stocks (no crypto)
+  - Crypto usa solo técnico + noticias (pro signals son stock-oriented)
+  - Asset-class aware: detecta si el ticker es crypto para ajustar pesos
 """
 from strategies.base_strategy import BaseStrategy
-from config import MIN_SIGNAL_SCORE
+from config import MIN_SIGNAL_SCORE, CRYPTO
+
+
+# Sentimiento de mercado por debajo de este umbral → no comprar stocks
+_STOCK_SENTIMENT_VETO = -0.15
 
 
 class CombinedStrategy(BaseStrategy):
@@ -38,12 +50,41 @@ class CombinedStrategy(BaseStrategy):
         mkt_score  = market_sentiment
         pro_score  = pro_signal.get("pro_score", 0.0) if pro_signal else 0.0
         opt_score  = options_score
+        ticker     = technical.get("ticker", "")
 
-        # Si hay riesgo alto por earnings o macro, señal pro ya viene atenuada
         earnings_risk = (pro_signal or {}).get("earnings_risk", {}).get("risk", "LOW")
         macro_risk    = (pro_signal or {}).get("macro_risk", {}).get("risk", "LOW")
 
-        if pro_signal and opt_score != 0.0:
+        threshold = min_score if min_score is not None else MIN_SIGNAL_SCORE
+
+        # ── BLOCK DURO: no comprar antes de earnings ──────────────────
+        if earnings_risk == "HIGH":
+            return {
+                "action":         "HOLD",
+                "confidence":     0.0,
+                "combined_score": 0.0,
+                "reason":         f"BLOQUEADO: earnings_risk=HIGH — no entrar antes de resultados",
+                "earnings_risk":  earnings_risk,
+                "macro_risk":     macro_risk,
+            }
+
+        is_crypto = ticker in CRYPTO
+
+        # ── Veto de sentimiento de mercado (solo stocks) ──────────────
+        # Si el mercado está en pánico, no comprar acciones aunque la señal técnica
+        # sea alcista. Crypto tiene su propia dinámica y no aplica este veto.
+        if not is_crypto and mkt_score < _STOCK_SENTIMENT_VETO:
+            # Penalizar el score técnico en entornos de pánico macro
+            tech_score = tech_score * 0.5
+
+        # ── Cálculo del score combinado ───────────────────────────────
+
+        if is_crypto:
+            # Crypto: sin señales pro ni opciones útiles (son stock-oriented)
+            # Más peso técnico + noticias especializadas
+            combined = tech_score * 0.70 + news_score * 0.20 + mkt_score * 0.10
+
+        elif pro_signal and opt_score != 0.0:
             combined = (
                 tech_score * self.W_TECHNICAL
                 + pro_score  * self.W_PRO
@@ -59,7 +100,6 @@ class CombinedStrategy(BaseStrategy):
                 + mkt_score  * (self.W_MARKET + self.W_OPTIONS * 0.5)
             )
         elif opt_score != 0.0:
-            # Sin pro pero con opciones
             combined = (
                 tech_score * 0.55
                 + news_score * 0.20
@@ -67,16 +107,20 @@ class CombinedStrategy(BaseStrategy):
                 + opt_score  * 0.15
             )
         else:
-            # Sin señales pro ni opciones, redistribuir pesos
             combined = tech_score * 0.65 + news_score * 0.25 + mkt_score * 0.10
 
         confidence = abs(combined)
         sig_names  = [s[0] for s in technical.get("signals", [])]
 
-        # Contexto opciones para el log
+        # Info de daily trend y ADX para el log
+        daily_info = (
+            f" | daily={technical.get('daily_trend','?')}"
+            f" ADX={technical.get('adx', 0):.0f}"
+            f" sma200={technical.get('daily_sma200', 0):+.1f}%"
+        )
+
         opt_detail = f" | opciones={opt_score:+.3f}" if opt_score != 0.0 else ""
 
-        # Contexto pro para el log
         pro_detail = ""
         if pro_signal:
             analyst_chg = pro_signal.get("analyst", {}).get("recent_changes", [])
@@ -93,25 +137,26 @@ class CombinedStrategy(BaseStrategy):
             if macro_risk != "LOW":
                 pro_detail += f" ⚠ MACRO_RISK={macro_risk}"
 
-        threshold = min_score if min_score is not None else MIN_SIGNAL_SCORE
-
         if combined > threshold:
             action = "BUY"
             reason = (
                 f"Score={combined:.3f} "
                 f"(técnico={tech_score:.3f} noticias={news_score:.3f} mercado={mkt_score:.3f})"
-                f"{opt_detail}{pro_detail} | Señales: {', '.join(sig_names)}"
+                f"{daily_info}{opt_detail}{pro_detail} | Señales: {', '.join(sig_names)}"
             )
         elif combined < -threshold:
             action = "SELL"
             reason = (
                 f"Score={combined:.3f} "
                 f"(técnico={tech_score:.3f} noticias={news_score:.3f} mercado={mkt_score:.3f})"
-                f"{opt_detail}{pro_detail} | Señales: {', '.join(sig_names)}"
+                f"{daily_info}{opt_detail}{pro_detail} | Señales: {', '.join(sig_names)}"
             )
         else:
             action = "HOLD"
-            reason = f"Score insuficiente: {combined:.3f} (umbral ±{threshold}){pro_detail}"
+            reason = (
+                f"Score insuficiente: {combined:.3f} (umbral ±{threshold:.3f})"
+                f"{daily_info}{pro_detail}"
+            )
 
         return {
             "action":         action,

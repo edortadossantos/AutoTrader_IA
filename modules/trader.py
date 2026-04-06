@@ -40,7 +40,7 @@ _pro_cache  = {"data": None, "updated_at": None}
 
 
 def get_news_cache() -> dict:
-    return _news_cache["data"] or {"ticker_news": {}, "market_sentiment": 0.0}
+    return _news_cache["data"] or {"ticker_news": {}, "market_sentiment": 0.0, "crypto_fear_greed": {"score": 0.0}}
 
 
 def get_pro_cache() -> dict:
@@ -183,6 +183,7 @@ def scan_and_trade(tickers: list[str] | None = None) -> list[dict]:
         news_data        = get_news_cache()
         pro_data         = get_pro_cache()
         market_sentiment = news_data.get("market_sentiment", 0.0)
+        fng_score        = news_data.get("crypto_fear_greed", {}).get("score", 0.0)
 
         for ticker in active:
             try:
@@ -196,11 +197,14 @@ def scan_and_trade(tickers: list[str] | None = None) -> list[dict]:
                 ticker_pro   = pro_data.get("ticker_signals", {}).get(ticker)
                 options_score = get_ticker_options_score(ticker)
 
+                # Crypto usa Fear&Greed como sentimiento de mercado en vez del macro SPY/VIX
+                effective_market_sentiment = fng_score if asset_class == "crypto" else market_sentiment
+
                 # Umbral ajustado por régimen de mercado
                 adjusted_min_score = params["min_score"] * regime["min_score_mult"]
 
                 signal = strategy.generate_signal(
-                    tech, ticker_news, market_sentiment, ticker_pro,
+                    tech, ticker_news, effective_market_sentiment, ticker_pro,
                     min_score=adjusted_min_score,
                     options_score=options_score,
                 )
@@ -259,8 +263,10 @@ def scan_and_trade(tickers: list[str] | None = None) -> list[dict]:
 
 
 def scan_crypto_only() -> list[dict]:
-    """Ciclo dedicado a crypto (se llama cuando NYSE está cerrado)."""
-    return scan_and_trade(tickers=CRYPTO)
+    """Ciclo dedicado a crypto + commodities (cuando NYSE está cerrado).
+    Crypto opera 24/7; commodities (CME) tienen sesión casi 24h."""
+    from config import COMMODITIES
+    return scan_and_trade(tickers=CRYPTO + COMMODITIES)
 
 
 def scan_all_markets() -> list[dict]:

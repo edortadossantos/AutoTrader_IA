@@ -58,8 +58,17 @@ US_ETFS = [
 ]
 
 # ── Crypto — operan 24/7, máxima volatilidad ────────────────────
-# BTC/ETH lideran el mercado; SOL el de más momentum actual
-CRYPTO = ["BTC-USD", "ETH-USD", "SOL-USD"]
+# BTC/ETH lideran el mercado; SOL/AVAX/LINK tienen más momentum
+# XRP y BNB: alta liquidez y ecosistemas propios
+CRYPTO = [
+    "BTC-USD",   # Bitcoin — líder de mercado, referencia macro
+    "ETH-USD",   # Ethereum — DeFi + smart contracts
+    "SOL-USD",   # Solana — alta velocidad, momentum fuerte
+    "BNB-USD",   # Binance Coin — ecosistema BSC, muy líquido
+    "XRP-USD",   # XRP — pagos internacionales, alta liquidez
+    "AVAX-USD",  # Avalanche — DeFi alternativo, alta volatilidad
+    "LINK-USD",  # Chainlink — oráculos, beta alto con crypto total
+]
 
 # ── Commodities futuros — cobertura macro ───────────────────────
 COMMODITIES = [
@@ -81,7 +90,7 @@ WATCHLIST = US_TECH + US_FINANCIALS + US_ENERGY + US_HEALTH + US_CONSUMER + US_E
 # Cada clase tiene volatilidad distinta → stops y sizing distintos
 ASSET_CLASS_PARAMS = {
     # clase            pos_pct  stop   tp    min_score
-    "crypto":     dict(max_pos=0.05, stop=0.08, tp=0.20, min_score=0.65),  # muy volátil
+    "crypto":     dict(max_pos=0.05, stop=0.08, tp=0.20, min_score=0.57),  # muy volátil (era 0.65 — inalcanzable sin MACD crossover)
     "commodity":  dict(max_pos=0.07, stop=0.04, tp=0.10, min_score=0.55),  # menos volátil
     "etf":        dict(max_pos=0.12, stop=0.04, tp=0.10, min_score=0.55),  # baja volatilidad
     "stock":      dict(max_pos=0.10, stop=0.05, tp=0.12, min_score=0.60),  # estándar
@@ -104,11 +113,11 @@ def get_asset_params(ticker: str) -> dict:
 MAX_POSITION_PCT     = 0.10   # default — sobrescrito por asset class
 STOP_LOSS_PCT        = 0.05
 TAKE_PROFIT_PCT      = 0.12
-MAX_OPEN_POSITIONS   = 8      # más activos = más posiciones simultáneas
+MAX_OPEN_POSITIONS   = 10     # más activos = más posiciones simultáneas (ampliado por más crypto)
 MIN_SIGNAL_SCORE     = 0.60
 
 # Límite de exposición por clase (% del capital total)
-MAX_EXPOSURE_CRYPTO     = 0.15   # máx 15% en crypto
+MAX_EXPOSURE_CRYPTO     = 0.25   # máx 25% en crypto (ampliado — más pares disponibles)
 MAX_EXPOSURE_COMMODITY  = 0.15   # máx 15% en commodities
 MAX_EXPOSURE_INTL       = 0.15   # máx 15% en internacional
 MAX_EXPOSURE_SINGLE_SECTOR = 0.30  # máx 30% en cualquier sector US
@@ -148,8 +157,14 @@ SECTOR_MAP = {
     "XLK":  "etf_tech",   "XLF": "etf_fin",    "XLE": "etf_energy",
     "XLV":  "etf_health", "XLI": "etf_ind",
     "GLD":  "etf_gold",   "SLV": "etf_silver", "USO": "etf_oil",
-    # Crypto (máx 2 de 3 simultáneamente)
-    "BTC-USD": "crypto",  "ETH-USD": "crypto",  "SOL-USD": "crypto",
+    # Crypto (máx 2 simultáneamente por sector)
+    "BTC-USD":  "crypto_btc",   # BTC en su propio sector (referencia)
+    "ETH-USD":  "crypto_eth",   # ETH en su propio sector
+    "SOL-USD":  "crypto_alt",
+    "BNB-USD":  "crypto_alt",
+    "XRP-USD":  "crypto_alt",
+    "AVAX-USD": "crypto_alt",
+    "LINK-USD": "crypto_alt",
     # Futuros
     "GC=F": "fut_gold",  "CL=F": "fut_oil",  "SI=F": "fut_silver",
     # Internacional
