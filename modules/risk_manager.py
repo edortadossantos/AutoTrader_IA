@@ -18,6 +18,13 @@ from modules.portfolio import (
     get_cash, get_positions, get_equity,
     update_trailing_high, set_cooldown, is_in_cooldown,
 )
+from modules.market_regime import get_market_regime
+
+# Cuánto capital arriesgar según el régimen de mercado
+# BULL: doble de lo normal — tendencia fuerte, aprovechar
+# NEUTRAL: normal
+# BEAR: mitad — preservar capital, evitar mercados bajistas
+_REGIME_SIZE_MULT = {"bull": 2.0, "neutral": 1.0, "bear": 0.5}
 
 
 def calc_position_size(ticker: str, price: float, current_prices: dict) -> float:
@@ -34,7 +41,13 @@ def calc_position_size(ticker: str, price: float, current_prices: dict) -> float
     cash   = get_cash()
     params = get_asset_params(ticker)
 
-    max_dollars = min(equity * params["max_pos"], cash * 0.95)
+    try:
+        regime = get_market_regime()
+        size_mult = _REGIME_SIZE_MULT.get(regime["regime"], 1.0)
+    except Exception:
+        size_mult = 1.0
+
+    max_dollars = min(equity * params["max_pos"] * size_mult, cash * 0.95)
 
     asset_class = get_asset_class(ticker)
     positions   = get_positions()
