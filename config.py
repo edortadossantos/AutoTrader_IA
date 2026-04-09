@@ -12,6 +12,16 @@ ALPHA_VANTAGE_KEY     = os.getenv("ALPHA_VANTAGE_KEY", "")
 REDDIT_CLIENT_ID      = os.getenv("REDDIT_CLIENT_ID", "")
 REDDIT_CLIENT_SECRET  = os.getenv("REDDIT_CLIENT_SECRET", "")
 
+# ── FRED API (Federal Reserve Economic Data) ────────────────────
+# Clave gratuita en: https://fred.stlouisfed.org/docs/api/api_key.html
+# Usa: curva de tipos (T10Y2Y), VIX (VIXCLS) para señales macro.
+FRED_API_KEY          = os.getenv("FRED_API_KEY", "")
+
+# ── Kalshi API (mercado de predicción regulado CFTC) ────────────
+# Clave opcional para datos avanzados: https://kalshi.com/api-docs
+# Sin clave: acceso a datos públicos de mercado (solo lectura).
+KALSHI_API_KEY        = os.getenv("KALSHI_API_KEY", "")
+
 # ── Telegram (alertas en tiempo real) ──────────────────────────
 # Setup: @BotFather → /newbot → copia TOKEN
 #        api.telegram.org/bot<TOKEN>/getUpdates → copia chat_id
@@ -52,9 +62,17 @@ US_ETFS = [
     "XLE",   # Energy sector ETF
     "XLV",   # Health sector ETF
     "XLI",   # Industrial sector ETF
+    "XLU",   # Utilities — defensivo en bear market
+    "XLP",   # Consumer Staples — defensivo en bear market
     "GLD",   # Oro físico (ETF) — refugio en crisis
     "SLV",   # Plata (ETF)
     "USO",   # Petróleo WTI (ETF)
+    "TLT",   # Bonos largo plazo — sube cuando hay huida a calidad
+    # ETFs inversos — para operar el lado corto del mercado
+    "SH",    # 1x inverso SPY — sube cuando el S&P 500 baja
+    "PSQ",   # 1x inverso QQQ — sube cuando el Nasdaq baja
+    "SDS",   # 2x inverso SPY — amplifica caídas del S&P 500
+    "SQQQ",  # 3x inverso QQQ — máxima palanca bajista Nasdaq
 ]
 
 # ── Crypto — operan 24/7, máxima volatilidad ────────────────────
@@ -88,13 +106,23 @@ WATCHLIST = US_TECH + US_FINANCIALS + US_ENERGY + US_HEALTH + US_CONSUMER + US_E
 
 # ── PARÁMETROS DE RIESGO POR CLASE DE ACTIVO ────────────────────
 # Cada clase tiene volatilidad distinta → stops y sizing distintos
+# ── Operar en corto habilitado ───────────────────────────────────
+SHORT_ENABLED = True   # Permite abrir posiciones SHORT en stocks/ETFs
+
+# ── ETFs inversos (se tratan como LONG pero correlacionan inversamente) ───────
+INVERSE_ETFS = {"SH", "PSQ", "SDS", "SQQQ"}
+
 ASSET_CLASS_PARAMS = {
-    # clase            pos_pct  stop   tp    min_score
-    "crypto":     dict(max_pos=0.05, stop=0.08, tp=0.20, min_score=0.57),  # muy volátil (era 0.65 — inalcanzable sin MACD crossover)
-    "commodity":  dict(max_pos=0.07, stop=0.04, tp=0.10, min_score=0.55),  # menos volátil
-    "etf":        dict(max_pos=0.12, stop=0.04, tp=0.10, min_score=0.55),  # baja volatilidad
-    "stock":      dict(max_pos=0.10, stop=0.05, tp=0.12, min_score=0.60),  # estándar
-    "intl":       dict(max_pos=0.08, stop=0.05, tp=0.12, min_score=0.58),  # internacional
+    # clase       max_pos  stop   tp    min_score
+    # Umbrales reducidos para trading activo (day/swing trading):
+    #   - Stock: 0.55→0.42 | ETF: 0.50→0.38 | más operaciones de calidad
+    #   - Crypto mantiene 0.22 (muy volátil, oportunidades frecuentes)
+    #   - Commodity 0.30 (oro/petróleo con noticias macro = catalizadores claros)
+    "crypto":     dict(max_pos=0.05, stop=0.08, tp=0.20, min_score=0.22),
+    "commodity":  dict(max_pos=0.07, stop=0.04, tp=0.10, min_score=0.30),
+    "etf":        dict(max_pos=0.12, stop=0.04, tp=0.10, min_score=0.38),
+    "stock":      dict(max_pos=0.10, stop=0.05, tp=0.12, min_score=0.42),
+    "intl":       dict(max_pos=0.08, stop=0.05, tp=0.12, min_score=0.40),
 }
 
 def get_asset_class(ticker: str) -> str:
@@ -114,7 +142,7 @@ MAX_POSITION_PCT     = 0.10   # default — sobrescrito por asset class
 STOP_LOSS_PCT        = 0.05
 TAKE_PROFIT_PCT      = 0.12
 MAX_OPEN_POSITIONS   = 10     # más activos = más posiciones simultáneas (ampliado por más crypto)
-MIN_SIGNAL_SCORE     = 0.60
+MIN_SIGNAL_SCORE     = 0.42
 
 # Límite de exposición por clase (% del capital total)
 MAX_EXPOSURE_CRYPTO     = 0.25   # máx 25% en crypto (ampliado — más pares disponibles)
@@ -155,8 +183,12 @@ SECTOR_MAP = {
     # ETFs — agrupados para no duplicar exposición sectorial
     "SPY":  "etf_broad",  "QQQ": "etf_tech",   "IWM": "etf_small",
     "XLK":  "etf_tech",   "XLF": "etf_fin",    "XLE": "etf_energy",
-    "XLV":  "etf_health", "XLI": "etf_ind",
-    "GLD":  "etf_gold",   "SLV": "etf_silver", "USO": "etf_oil",
+    "XLV":  "etf_health", "XLI": "etf_ind",    "XLU": "etf_util",
+    "XLP":  "etf_staples","GLD": "etf_gold",   "SLV": "etf_silver",
+    "USO":  "etf_oil",    "TLT": "etf_bonds",
+    # ETFs inversos — sector propio para no bloquear otros ETFs
+    "SH":   "etf_inv_broad", "PSQ":  "etf_inv_tech",
+    "SDS":  "etf_inv_broad", "SQQQ": "etf_inv_tech",
     # Crypto (máx 2 simultáneamente por sector)
     "BTC-USD":  "crypto_btc",   # BTC en su propio sector (referencia)
     "ETH-USD":  "crypto_eth",   # ETH en su propio sector
@@ -190,8 +222,8 @@ DAILY_LOSS_LIMIT_PCT     = 0.05
 MAX_CONSECUTIVE_LOSSES   = 4
 
 # ── Parámetros técnicos ─────────────────────────────────────────
-RSI_OVERSOLD   = 35
-RSI_OVERBOUGHT = 65
+RSI_OVERSOLD   = 38   # más sensible para detectar antes las oportunidades
+RSI_OVERBOUGHT = 62   # simétrico — detecta sobrecompra antes para cortos
 RSI_PERIOD     = 14
 MACD_FAST      = 12
 MACD_SLOW      = 26
@@ -202,9 +234,9 @@ SMA_SHORT      = 20
 SMA_LONG       = 50
 
 # ── Scheduler ──────────────────────────────────────────────────
-SCAN_INTERVAL_MINUTES      = 15   # escaneo general
-CRYPTO_SCAN_INTERVAL_MIN   = 10   # crypto más frecuente (24/7)
-NEWS_INTERVAL_MINUTES      = 5
+SCAN_INTERVAL_MINUTES      = 12   # escaneo general (era 15)
+CRYPTO_SCAN_INTERVAL_MIN   = 8    # crypto más frecuente 24/7 (era 10)
+NEWS_INTERVAL_MINUTES      = 4    # noticias más frecuentes (era 5)
 PRO_SIGNALS_INTERVAL_MIN   = 30   # señales pro (límite API)
 
 # ── Screener dinámico (S&P 500 + S&P 400 MidCap) ───────────────────────────
@@ -289,4 +321,16 @@ NEWS_RSS_FEEDS = [
     "https://www.etf.com/sections/features-and-news?rss",
     # ── Investors.com IBD ────────────────────────────────────────
     "https://www.investors.com/feed/",
+    # ── Federal Reserve (comunicados oficiales) ───────────────────
+    "https://www.federalreserve.gov/feeds/press_all.xml",
+    # ── US Treasury (política arancelaria y fiscal) ───────────────
+    "https://home.treasury.gov/system/files/276/treasury-press-releases.xml",
+    # ── Politico Economy (tariffs, política comercial) ────────────
+    "https://rss.politico.com/economy.xml",
+    # ── The Hill (política US, decisiones regulatorias) ──────────
+    "https://thehill.com/rss/syndicator/19109",
+    # ── IMF News (macro global) ───────────────────────────────────
+    "https://www.imf.org/en/News/rss?category=News&subcategory=Press+Release",
+    # ── FRED Blog (Federal Reserve St. Louis — datos macro) ───────
+    "https://fredblog.stlouisfed.com/feed/",
 ]
