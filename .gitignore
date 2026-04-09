@@ -5,6 +5,8 @@ __pycache__/
 .env
 data/*.db
 logs/*.log
+*.pem
+bot.pid
 .idea/
 .vscode/
 *.egg-info/

@@ -21,8 +21,11 @@ Señal generada:
   +1.0 → mercados predicen entorno muy favorable (bajadas tipos, no recesión)
   -1.0 → mercados predicen entorno adverso (subida tipos, recesión inminente)
 """
+import base64
 import logging
 import math
+import os
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -212,62 +215,210 @@ def get_polymarket_signal() -> dict:
 # 2. KALSHI
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _kalshi_auth_headers(api_key_id: str, method: str, path: str) -> dict:
+    """
+    Genera headers de autenticación RSA para Kalshi API v2.
+    Requiere kalshi_private.pem en el directorio raíz del proyecto.
+    """
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+
+        pem_path = os.path.join(os.path.dirname(__file__), "..", "kalshi_private.pem")
+        pem_path = os.path.abspath(pem_path)
+
+        with open(pem_path, "rb") as f:
+            private_key = serialization.load_pem_private_key(f.read(), password=None)
+
+        ts_ms = str(int(time.time() * 1000))
+        msg   = (ts_ms + method.upper() + path).encode("utf-8")
+        sig   = private_key.sign(
+            msg,
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                salt_length=asym_padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        sig64 = base64.b64encode(sig).decode("utf-8")
+
+        return {
+            **_HEADERS,
+            "KALSHI-ACCESS-KEY":       api_key_id,
+            "KALSHI-ACCESS-SIGNATURE": sig64,
+            "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+        }
+    except Exception as e:
+        logger.debug(f"Kalshi RSA auth error: {e}")
+        return _HEADERS
+
+
+def _kalshi_fetch_series(api_key: str, series_ticker: str) -> list[dict]:
+    """Descarga mercados de una serie Kalshi específica."""
+    path = "/trade-api/v2/markets"
+    base = "https://api.elections.kalshi.com"
+    headers = _kalshi_auth_headers(api_key, "GET", path) if api_key else _HEADERS
+    r = requests.get(
+        base + path,
+        params={"status": "open", "limit": 200, "series_ticker": series_ticker},
+        headers=headers,
+        timeout=_TIMEOUT,
+    )
+    return r.json().get("markets", [])
+
+
+def _score_kalshi_range_markets(markets: list[dict], asset_name: str) -> tuple[float, float] | None:
+    """
+    Puntúa mercados de rango de precio (KXBTC, KXETH, KXWTI).
+
+    Kalshi ofrece mercados binarios del tipo "¿estará BTC por encima de $X en fecha Y?".
+    Hay múltiples strikes para el mismo subyacente. El strike con probabilidad ~50%
+    es el precio implícito del mercado. Si el precio implícito > strike mediano → bullish.
+
+    Retorna (score, weight) o None si no hay datos suficientes.
+    """
+    # Recoger (strike, yes_prob, volume) de cada mercado
+    points = []
+    for m in markets:
+        subtitle = m.get("subtitle", "") or m.get("yes_sub_title", "") or ""
+        strike   = m.get("floor_strike")
+        if strike is None:
+            continue
+        strike = float(strike)
+
+        bid_raw = m.get("yes_bid_dollars") or m.get("yes_bid") or 0
+        ask_raw = m.get("yes_ask_dollars") or m.get("yes_ask") or 0
+        try:
+            bid = float(bid_raw)
+            ask = float(ask_raw)
+        except (TypeError, ValueError):
+            continue
+
+        # Kalshi dollars: 0.0 – 1.0 (probability). 0-100 scale requires /100 extra.
+        # Check which scale: if bid > 1.1 assume it's cents scale
+        if bid > 1.1 or ask > 1.1:
+            bid /= 100.0
+            ask /= 100.0
+
+        yes_prob = (bid + ask) / 2.0
+        if yes_prob <= 0 or yes_prob >= 1:
+            yes_prob = bid if bid > 0 else ask
+        if yes_prob <= 0:
+            continue
+
+        vol = float(m.get("volume_fp") or m.get("volume") or 0)
+        points.append((strike, yes_prob, vol))
+
+    if len(points) < 3:
+        return None
+
+    # El precio implícito = strike donde yes_prob cruza 0.5
+    # Ordenar por strike ascendente
+    points.sort(key=lambda x: x[0])
+    strikes  = [p[0] for p in points]
+    probs    = [p[1] for p in points]
+    volumes  = [p[2] for p in points]
+
+    # Probabilidad más cercana a 0.5 → implied price = strike correspondiente
+    closest_idx = min(range(len(probs)), key=lambda i: abs(probs[i] - 0.5))
+    implied_price = strikes[closest_idx]
+    prob_at_50 = probs[closest_idx]
+
+    # Si prob > 0.5 en el strike mediano → mercado espera precio ENCIMA del strike → bullish
+    # Normalizar: score basado en cuánto se desvía la prob del 50%
+    median_strike = strikes[len(strikes) // 2]
+    score = (prob_at_50 - 0.5) * 2  # -1..+1
+    total_vol = sum(volumes)
+    weight = math.log10(max(total_vol, 1)) if total_vol > 0 else 1.0
+
+    return (score, weight)
+
+
 def get_kalshi_signal() -> dict:
     """
     Señal de Kalshi — único exchange de predicción regulado por CFTC en EEUU.
 
-    Los mercados financieros (FOMC, CPI, recesión, S&P) requieren KALSHI_API_KEY.
-    Sin clave se usan mercados públicos (más limitados).
-    Registro gratuito en: https://kalshi.com
+    Con KALSHI_API_KEY + kalshi_private.pem usa autenticación RSA.
+    Cubre: mercados de rango BTC/ETH/WTI/Gold + mercados binarios macro si existen.
     """
     from config import KALSHI_API_KEY
 
-    try:
-        if KALSHI_API_KEY:
-            base_url = "https://trading-api.kalshi.com/trade-api/v2/markets"
-            headers  = {**_HEADERS, "Authorization": f"Bearer {KALSHI_API_KEY}"}
-        else:
-            # Endpoint público (sin auth) — mercados no-financieros mayormente
-            base_url = "https://api.elections.kalshi.com/trade-api/v2/markets"
-            headers  = _HEADERS
+    BASE = "https://api.elections.kalshi.com"
+    PATH = "/trade-api/v2/markets"
 
+    try:
+        headers = _kalshi_auth_headers(KALSHI_API_KEY, "GET", PATH) if KALSHI_API_KEY else _HEADERS
+
+        # ── Mercados generales (macro/elecciones/eventos) ──────────────────
         r = requests.get(
-            base_url,
+            BASE + PATH,
             params={"status": "open", "limit": 200},
             headers=headers,
             timeout=_TIMEOUT,
         )
-        data    = r.json()
-        markets = data.get("markets", [])
-        if not markets:
-            return {"signal": 0.0, "summary": "no_data", "markets_used": 0, "source": "Kalshi"}
+        all_markets = r.json().get("markets", [])
 
         scores   = []
         relevant = []
 
-        for m in markets:
-            title    = m.get("title", "") or m.get("subtitle", "") or ""
-            yes_bid  = float(m.get("yes_bid", 50) or 50)
-            yes_ask  = float(m.get("yes_ask", 50) or 50)
-            volume   = float(m.get("volume", 0) or 0)
+        # ── 1. Keyword matching en mercados generales ──────────────────────
+        for m in all_markets:
+            title  = m.get("title", "") or m.get("subtitle", "") or ""
+            bid_r  = m.get("yes_bid_dollars") or m.get("yes_bid") or 0
+            ask_r  = m.get("yes_ask_dollars") or m.get("yes_ask") or 0
+            vol    = float(m.get("volume_fp") or m.get("volume") or 0)
 
-            if volume < 1_000:
+            if vol < 500:
                 continue
 
-            yes_prob = (yes_bid + yes_ask) / 200.0  # 0-100 → 0-1
+            try:
+                bid = float(bid_r)
+                ask = float(ask_r)
+            except (TypeError, ValueError):
+                continue
+
+            if bid > 1.1 or ask > 1.1:  # escala 0-100
+                bid /= 100.0
+                ask /= 100.0
+
+            yes_prob = (bid + ask) / 2.0
 
             score = _score_question(title, yes_prob)
             if score is None:
                 continue
 
-            weight = math.log10(max(volume, 1))
+            weight = math.log10(max(vol, 1))
             scores.append((score, weight))
             relevant.append({
                 "title":    title,
                 "yes_prob": round(yes_prob, 3),
-                "volume":   round(volume, 0),
+                "volume":   round(vol, 0),
                 "signal":   round(score, 3),
             })
+
+        # ── 2. Mercados de rango financiero (KXBTC, KXETH, KXWTI) ──────────
+        if KALSHI_API_KEY:
+            for series, asset_name, is_bullish_asset in [
+                ("KXBTC", "bitcoin", True),
+                ("KXETH", "ethereum", True),
+                ("KXWTI", "oil", None),  # petróleo: neutral para señal macro general
+            ]:
+                try:
+                    series_markets = _kalshi_fetch_series(KALSHI_API_KEY, series)
+                    result = _score_kalshi_range_markets(series_markets, asset_name)
+                    if result is not None:
+                        raw_score, weight = result
+                        # BTC/ETH bullish = señal macro bullish; petróleo = neutral
+                        if is_bullish_asset is True:
+                            scores.append((raw_score, weight))
+                            relevant.append({
+                                "title":    f"{asset_name} range markets ({series})",
+                                "yes_prob": round(0.5 + raw_score / 2, 3),
+                                "volume":   "series",
+                                "signal":   round(raw_score, 3),
+                            })
+                except Exception as e:
+                    logger.debug(f"Kalshi series {series} error: {e}")
 
         if not scores:
             note = "" if KALSHI_API_KEY else " — añade KALSHI_API_KEY para mercados financieros"
