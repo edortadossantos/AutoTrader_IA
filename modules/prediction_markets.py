@@ -29,25 +29,43 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = 10
-_HEADERS = {"User-Agent": "AutoTrader-IA/1.0 (research)"}
+_TIMEOUT = 12
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+}
 
 # ── Palabras clave para clasificar mercados en Polymarket/Kalshi ─────────────
 # Formato: (keyword, is_bullish)
 # is_bullish=True  → YES de este mercado = bueno para mercados financieros
 # is_bullish=False → YES de este mercado = malo para mercados financieros
 _MARKET_KEYWORDS: list[tuple[str, bool]] = [
-    # Tipos de interés Fed (bajadas = bullish para acciones/crypto)
+    # Fed — bajada de tipos = bullish para acciones y crypto
+    ("fed decrease interest rates", True),
+    ("fed cut", True),
     ("rate cut", True),
     ("cuts rates", True),
     ("rate reduction", True),
     ("lower rates", True),
     ("fed pivot", True),
+    ("no change in fed interest rates", None),  # neutral (mantener = ni bullish ni bearish)
     ("rate hike", False),
+    ("fed increase interest rates", False),
     ("hikes rates", False),
     ("rate increase", False),
     ("higher rates", False),
-    # Recesión (recesión = bearish)
+    # Bitcoin/Crypto — precio más alto = bullish
+    ("price of bitcoin be above", True),    # "above X" → YES prob alta = bullish
+    ("bitcoin reach", True),
+    ("bitcoin above", True),
+    ("bitcoin below", False),
+    ("crypto etf approved", True),
+    ("crypto ban", False),
+    ("bitcoin etf", True),
+    # Recesión
     ("recession", False),
     ("gdp contraction", False),
     ("no recession", True),
@@ -67,12 +85,6 @@ _MARKET_KEYWORDS: list[tuple[str, bool]] = [
     ("cpi below", True),
     ("cpi above", False),
     ("stagflation", False),
-    # Crypto
-    ("bitcoin above", True),
-    ("bitcoin below", False),
-    ("crypto etf approved", True),
-    ("crypto ban", False),
-    ("bitcoin etf", True),
     # Macro global
     ("gdp growth", True),
     ("strong jobs", True),
@@ -81,6 +93,15 @@ _MARKET_KEYWORDS: list[tuple[str, bool]] = [
     ("bank failure", False),
     ("tariff", False),
     ("trade war", False),
+    # Volatilidad/crisis — resoluciones primero (más específicas que "iran"/"war")
+    ("ceasefire", True),          # paz acordada = bullish (más específico que "iran")
+    ("conflict ends", True),      # conflicto resuelto = bullish
+    ("iran strike", False),       # ataque irani = bearish
+    ("invade iran", False),       # EEUU invade Iran = escalada = bearish
+    ("military action against iran", False),
+    ("us declare war", False),
+    ("iran", False),              # mención general Iran = incertidumbre = bearish
+    ("war", False),               # guerra genérica = bearish
 ]
 
 
@@ -88,10 +109,13 @@ def _score_question(question: str, yes_prob: float) -> float | None:
     """
     Convierte una pregunta de predicción + probabilidad YES en un score bullish/bearish.
     Retorna None si la pregunta no es relevante para trading.
+    None como is_bullish → mercado neutral (retorna 0.0 en lugar de ignorar).
     """
     q = question.lower()
     for keyword, is_bullish in _MARKET_KEYWORDS:
         if keyword in q:
+            if is_bullish is None:
+                return 0.0   # mercado relevante pero neutral (ej: "no change in Fed")
             # Normaliza 0-1 a -1..+1 centrado en 0.5
             raw = (yes_prob - 0.5) * 2
             return raw if is_bullish else -raw
@@ -139,6 +163,10 @@ def get_polymarket_signal() -> dict:
                 continue
 
             try:
+                # outcomePrices puede ser lista o string JSON '["0.73","0.27"]'
+                if isinstance(outcomes_prices, str):
+                    import json as _json
+                    outcomes_prices = _json.loads(outcomes_prices)
                 if isinstance(outcomes_prices, list) and len(outcomes_prices) >= 1:
                     yes_prob = float(outcomes_prices[0])
                 else:
@@ -186,34 +214,44 @@ def get_polymarket_signal() -> dict:
 
 def get_kalshi_signal() -> dict:
     """
-    Señal de Kalshi — único mercado de predicción regulado por CFTC en EEUU.
+    Señal de Kalshi — único exchange de predicción regulado por CFTC en EEUU.
 
-    Especializado en eventos macro: tipos Fed, CPI, NFP, recesión,
-    rendimiento S&P 500, etc. La regulación CFTC garantiza mayor liquidez
-    e integridad del mercado vs plataformas descentralizadas.
+    Los mercados financieros (FOMC, CPI, recesión, S&P) requieren KALSHI_API_KEY.
+    Sin clave se usan mercados públicos (más limitados).
+    Registro gratuito en: https://kalshi.com
     """
+    from config import KALSHI_API_KEY
+
     try:
+        if KALSHI_API_KEY:
+            base_url = "https://trading-api.kalshi.com/trade-api/v2/markets"
+            headers  = {**_HEADERS, "Authorization": f"Bearer {KALSHI_API_KEY}"}
+        else:
+            # Endpoint público (sin auth) — mercados no-financieros mayormente
+            base_url = "https://api.elections.kalshi.com/trade-api/v2/markets"
+            headers  = _HEADERS
+
         r = requests.get(
-            "https://trading-api.kalshi.com/trade-api/v2/markets",
+            base_url,
             params={"status": "open", "limit": 200},
-            headers=_HEADERS,
+            headers=headers,
             timeout=_TIMEOUT,
         )
         data    = r.json()
         markets = data.get("markets", [])
         if not markets:
-            return {"signal": 0.0, "summary": "no_data", "markets_used": 0}
+            return {"signal": 0.0, "summary": "no_data", "markets_used": 0, "source": "Kalshi"}
 
-        scores  = []
+        scores   = []
         relevant = []
 
         for m in markets:
-            title    = m.get("title", "") or m.get("question", "")
-            yes_bid  = m.get("yes_bid", 50) or 50   # cents 0-100
-            yes_ask  = m.get("yes_ask", 50) or 50
+            title    = m.get("title", "") or m.get("subtitle", "") or ""
+            yes_bid  = float(m.get("yes_bid", 50) or 50)
+            yes_ask  = float(m.get("yes_ask", 50) or 50)
             volume   = float(m.get("volume", 0) or 0)
 
-            if volume < 5_000:
+            if volume < 1_000:
                 continue
 
             yes_prob = (yes_bid + yes_ask) / 200.0  # 0-100 → 0-1
@@ -232,7 +270,11 @@ def get_kalshi_signal() -> dict:
             })
 
         if not scores:
-            return {"signal": 0.0, "summary": "no_relevant_markets", "markets_used": 0}
+            note = "" if KALSHI_API_KEY else " — añade KALSHI_API_KEY para mercados financieros"
+            return {
+                "signal": 0.0, "summary": f"no_relevant_markets{note}",
+                "markets_used": 0, "source": "Kalshi",
+            }
 
         total_weight   = sum(w for _, w in scores)
         weighted_score = sum(s * w for s, w in scores) / total_weight
@@ -249,7 +291,7 @@ def get_kalshi_signal() -> dict:
 
     except Exception as e:
         logger.debug(f"Kalshi signal error: {e}")
-        return {"signal": 0.0, "summary": "error", "markets_used": 0}
+        return {"signal": 0.0, "summary": "error", "markets_used": 0, "source": "Kalshi"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -46,7 +46,15 @@ from config import FRED_API_KEY
 
 logger     = logging.getLogger(__name__)
 _TIMEOUT   = 12
-_HEADERS   = {"User-Agent": "AutoTrader-IA/1.0 (research)"}
+# Headers de navegador — necesarios para CNN y CBOE que bloquean bots genéricos
+_HEADERS   = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,7 +83,7 @@ def get_cnn_fear_greed() -> dict:
     try:
         r = requests.get(
             "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
-            headers=_HEADERS,
+            headers={**_HEADERS, "Referer": "https://money.cnn.com/"},
             timeout=_TIMEOUT,
         )
         fg_data = r.json().get("fear_and_greed", {})
@@ -407,13 +415,14 @@ _PCR_TTL = 3600
 
 def get_put_call_ratio() -> dict:
     """
-    Put/Call Ratio del CBOE — indicador contrario de sentimiento de corto plazo.
+    Put/Call Ratio calculado desde el feed de opciones SPY del CBOE.
 
     Ratio > 1.2 → pesimismo extremo → precede rebotes (BULLISH contrario)
     Ratio ~ 0.9 → equilibrio neutral
     Ratio < 0.7 → complacencia extrema → precede correcciones (BEARISH contrario)
 
-    CBOE publica datos diarios gratuitos en CSV.
+    Usa el JSON de opciones de SPY del CBOE (gratuito, sin auth).
+    El nombre de cada opción codifica el tipo: 'SPY250419P00480000' → P=put.
     """
     now = time.time()
     if _PCR_CACHE.get("ts", 0) + _PCR_TTL > now:
@@ -421,27 +430,30 @@ def get_put_call_ratio() -> dict:
 
     try:
         r = requests.get(
-            "https://www.cboe.com/publish/scheduledtask/mktdata/datahouse/equitypc.csv",
+            "https://cdn.cboe.com/api/global/delayed_quotes/options/SPY.json",
             headers=_HEADERS,
             timeout=_TIMEOUT,
         )
-        lines = r.text.strip().split("\n")
-
-        last_ratio: float | None = None
-        for line in reversed(lines):
-            parts = line.strip().split(",")
-            if len(parts) >= 3:
-                try:
-                    put_vol  = float(parts[1])
-                    call_vol = float(parts[2])
-                    if call_vol > 0:
-                        last_ratio = put_vol / call_vol
-                        break
-                except (ValueError, IndexError):
-                    continue
-
-        if last_ratio is None:
+        options = r.json().get("data", {}).get("options", [])
+        if not options:
             return {"signal": 0.0, "raw_ratio": None, "source": "CBOE_PCR_error"}
+
+        put_vol  = 0.0
+        call_vol = 0.0
+        for opt in options:
+            name = opt.get("option", "")
+            vol  = float(opt.get("volume", 0) or 0)
+            # Nombre formato: SPY260408C00500000 → posición 9 = C/P
+            if len(name) > 9:
+                if name[9] == "P":
+                    put_vol  += vol
+                elif name[9] == "C":
+                    call_vol += vol
+
+        if call_vol == 0:
+            return {"signal": 0.0, "raw_ratio": None, "source": "CBOE_PCR_no_calls"}
+
+        last_ratio = put_vol / call_vol
 
         if last_ratio > 1.5:
             signal = 0.9
@@ -459,8 +471,10 @@ def get_put_call_ratio() -> dict:
         result = {
             "signal":    round(signal, 4),
             "raw_ratio": round(last_ratio, 4),
+            "put_vol":   round(put_vol, 0),
+            "call_vol":  round(call_vol, 0),
             "summary":   "fear" if last_ratio > 1.2 else ("greed" if last_ratio < 0.7 else "neutral"),
-            "source":    "CBOE Put/Call Ratio",
+            "source":    "CBOE Put/Call Ratio (SPY options)",
         }
         _PCR_CACHE["ts"]   = now
         _PCR_CACHE["data"] = result
