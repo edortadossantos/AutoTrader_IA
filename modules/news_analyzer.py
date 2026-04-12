@@ -58,6 +58,12 @@ BREAKING_KEYWORDS = [
     "FDA approval", "FDA rejection", "layoffs", "CEO resigns", "CEO fired",
     "stock split", "dividend cut", "dividend increase", "share buyback",
     "guidance raised", "guidance lowered", "revenue warning", "profit warning",
+    # Macro / política — alta urgencia
+    "emergency rate cut", "rate cut", "rate hike", "Fed cuts", "Fed raises",
+    "new tariffs", "tariff increase", "trade ban", "sanctions imposed",
+    "circuit breaker", "market halt", "trading suspended", "flash crash",
+    "recession confirmed", "GDP contraction", "CPI surge", "inflation spike",
+    "bank failure", "credit crunch", "liquidity crisis", "debt downgrade",
 ]
 
 # ── Tickers → palabras clave para filtrado ───────────────────────────────────
@@ -123,6 +129,20 @@ TICKER_KEYWORDS: dict[str, list[str]] = {
               "developed markets", "MSCI EAFE", "ECB", "European Central Bank"],
     "EEM":   ["emerging markets", "EEM", "China stocks", "India stocks",
               "Brazil stocks", "MSCI emerging", "EM rally"],
+    # ── ETFs defensivos ──────────────────────────────────────────
+    "XLU":  ["utilities ETF", "XLU", "utilities sector", "electric utilities", "defensive sector"],
+    "XLP":  ["consumer staples", "XLP", "staples ETF", "defensive stocks", "consumer staples ETF"],
+    "TLT":  ["TLT", "Treasury bonds", "long-term bonds", "20-year Treasury", "bond rally",
+             "flight to quality", "safe haven bonds", "interest rate", "Fed rate", "yield"],
+    # ── ETFs inversos — siguen noticias macro/mercado bajista ────
+    "SH":   ["S&P 500", "SPY", "market crash", "bear market", "stock market decline",
+             "S&P selloff", "broad market", "equity sell-off", "market downturn"],
+    "PSQ":  ["Nasdaq", "QQQ", "tech crash", "Nasdaq decline", "tech selloff", "Nasdaq bear",
+             "tech stocks fall", "growth stocks", "FAANG", "Nasdaq correction"],
+    "SDS":  ["S&P 500", "SPY", "market crash", "bear market", "stock market decline",
+             "S&P selloff", "broad market drop", "equity bear", "recession fears"],
+    "SQQQ": ["Nasdaq", "QQQ", "tech crash", "Nasdaq decline", "tech selloff", "Nasdaq bear",
+             "tech stocks fall", "Nasdaq correction", "big tech", "AI bubble"],
     # ── Macro / mercado general ──────────────────────────────────
     "_MACRO": [
         "Federal Reserve", "Fed", "FOMC", "interest rate", "inflation", "CPI", "PPI",
@@ -130,6 +150,9 @@ TICKER_KEYWORDS: dict[str, list[str]] = {
         "stock market", "Wall Street", "S&P", "Nasdaq", "Dow Jones", "earnings season",
         "Treasury", "yield curve", "10-year", "rate hike", "rate cut", "quantitative",
         "dollar", "DXY", "tariff", "trade war", "geopolitical", "sanctions",
+        "Jerome Powell", "Janet Yellen", "Scott Bessent", "Treasury Secretary",
+        "debt ceiling", "fiscal policy", "federal budget", "government shutdown",
+        "trade deficit", "import duties", "export controls", "supply chain",
     ],
 }
 
@@ -204,7 +227,8 @@ def fetch_rss_articles() -> list[dict]:
     articles = []
     for url in NEWS_RSS_FEEDS:
         try:
-            feed = feedparser.parse(url, request_headers={"User-Agent": "AutoTrader/1.0"})
+            r = requests.get(url, timeout=10, headers={"User-Agent": "AutoTrader/1.0"})
+            feed = feedparser.parse(r.content)
             for entry in feed.entries[:20]:
                 articles.append({
                     "title":     entry.get("title", ""),
@@ -661,7 +685,9 @@ def run_news_analysis() -> dict:
     def _analyze_ticker(ticker: str) -> tuple[str, dict]:
         fh_sent      = fetch_finnhub_sentiment(ticker)
         company_news = fetch_finnhub_company_news(ticker)
-        finviz_news  = fetch_finviz_news(ticker)
+        # Finviz solo cubre stocks/ETFs US — evitar peticiones inútiles para crypto/futuros
+        is_stock_etf = ticker not in CRYPTO and ticker not in COMMODITIES
+        finviz_news  = fetch_finviz_news(ticker) if is_stock_etf else []
         extra_newsapi = fetch_newsapi_articles(ticker)
         ticker_articles = _deduplicate(all_articles + company_news + finviz_news + extra_newsapi)
         result = analyze_news_for_ticker(

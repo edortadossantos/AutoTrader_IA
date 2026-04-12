@@ -22,6 +22,11 @@ FRED_API_KEY          = os.getenv("FRED_API_KEY", "")
 # Sin clave: acceso a datos públicos de mercado (solo lectura).
 KALSHI_API_KEY        = os.getenv("KALSHI_API_KEY", "")
 
+# ── Alpaca Markets (datos en tiempo real, gratis — IEX feed) ────────────
+# Registro gratuito: https://alpaca.markets
+ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+
 # ── Telegram (alertas en tiempo real) ──────────────────────────
 # Setup: @BotFather → /newbot → copia TOKEN
 #        api.telegram.org/bot<TOKEN>/getUpdates → copia chat_id

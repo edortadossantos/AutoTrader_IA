@@ -18,7 +18,8 @@ import ta
 from config import (
     RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
-    BB_PERIOD, BB_STD, SMA_SHORT, SMA_LONG
+    BB_PERIOD, BB_STD, SMA_SHORT, SMA_LONG,
+    INVERSE_ETFS,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,11 +53,34 @@ _SIGNAL_CONTRIB = {
     "Daily uptrend":       +0.25,
     "Daily downtrend":     -0.25,
     "Daily mixed":          0.00,
+    # Señal de sobrevendido extremo: RSI < 30 + precio en BB inferior = rebote probable
+    # Compensa parcialmente el Daily downtrend en crashes para no perder el rebote.
+    "Extreme oversold":    +0.20,
+    # Señal de sobrecompra extrema: RSI > 70 + precio en BB superior = caída probable
+    "Extreme overbought":  -0.20,
     # Volumen (confirmación direccional)
     "Volume spike":        +0.10,   # vol > 1.5× media — señal confirmada
     "Volume above avg":    +0.05,   # vol > 1.1× media — leve confirmación
     "Volume dry":          -0.10,   # vol < 0.7× media — señal dudosa
     "Volume normal":        0.00,
+    # Momentum direccional (ADX fuerte + tendencia + MACD confirmado)
+    # NO se cancela con RSI/BB: representa tendencia pura sin ruido.
+    # Clave para detectar crashes sostenidos aunque el RSI esté sobrevendido.
+    "Momentum bull":       +0.25,   # ADX>25 + daily up + MACD hist>0
+    "Momentum bear":       -0.25,   # ADX>25 + daily down + MACD hist<0
+    # ROC — momentum de precio puro (Rate of Change)
+    # Independiente de RSI/BB: no se cancela con señales de reversión.
+    "ROC up":              +0.15,   # ROC5 > 0.8% y ROC20 > 1.5%
+    "ROC down":            -0.15,   # ROC5 < -0.8% y ROC20 < -1.5%
+    "ROC flat":             0.00,
+}
+
+# Señales que se invierten para ETFs inversos (SH, PSQ, SDS, SQQQ).
+# Cuando el mercado cae, el ETF sube → RSI overbought = señal alcista, no bajista.
+_INVERSE_INVERT = {
+    "RSI oversold", "RSI overbought",
+    "Price at BB lower", "Price at BB upper",
+    "Extreme oversold", "Extreme overbought",
 }
 
 
@@ -141,35 +165,37 @@ def fetch_daily_context(ticker: str) -> dict:
 
 
 def get_current_price(ticker: str) -> float | None:
+    """Alpaca IEX → yfinance fallback. Caché 30 s."""
     try:
-        t = yf.Ticker(ticker)
-        info = t.fast_info
-        return float(info.last_price)
+        from modules.data_layer import get_price
+        return get_price(ticker)
     except Exception:
         try:
-            df = fetch_ohlcv(ticker, period="1d", interval="1m")
-            if df is not None and not df.empty:
-                return float(df["Close"].iloc[-1])
+            return float(yf.Ticker(ticker).fast_info.last_price)
         except Exception:
             pass
     return None
 
 
 def get_current_prices(tickers: list[str]) -> dict[str, float]:
-    """Descarga precios en paralelo (hasta 12 hilos) para reducir latencia."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    prices: dict[str, float] = {}
-    with ThreadPoolExecutor(max_workers=min(12, len(tickers) or 1)) as ex:
-        futures = {ex.submit(get_current_price, t): t for t in tickers}
-        for fut in as_completed(futures):
-            ticker = futures[fut]
-            try:
-                p = fut.result()
-                if p:
-                    prices[ticker] = p
-            except Exception:
-                pass
-    return prices
+    """Batch Alpaca (1-2 llamadas) → yfinance fallback por ticker."""
+    try:
+        from modules.data_layer import get_prices_batch
+        return get_prices_batch(tickers)
+    except Exception:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        prices: dict[str, float] = {}
+        with ThreadPoolExecutor(max_workers=min(12, len(tickers) or 1)) as ex:
+            futures = {ex.submit(get_current_price, t): t for t in tickers}
+            for fut in as_completed(futures):
+                ticker = futures[fut]
+                try:
+                    p = fut.result()
+                    if p:
+                        prices[ticker] = p
+                except Exception:
+                    pass
+        return prices
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -259,6 +285,7 @@ def analyze_ticker(ticker: str) -> dict | None:
 
     # ── Tendencia DAILY (filtro macro — peso alto) ────────────────────
     daily = fetch_daily_context(ticker)
+    adx = daily["adx"]    # extraer aquí para usarlo también en Momentum signal
     if daily["trend"] == "up":
         signals.append(("Daily uptrend", _SIGNAL_CONTRIB["Daily uptrend"]))
     elif daily["trend"] == "down":
@@ -281,11 +308,85 @@ def analyze_ticker(ticker: str) -> dict | None:
     else:
         signals.append(("Volume normal", 0.0))
 
+    # ── Sobrevendido extremo (rebote en crash) ───────────────────────
+    # RSI < 30 + precio tocando/bajo BB inferior = confluencia de sobrevendido.
+    # Esta señal actúa como contrapeso parcial del "Daily downtrend" en crashes.
+    # Solo se emite si la señal ya tiene RSI oversold + BB lower (no se duplica).
+    has_rsi_oversold  = rsi < RSI_OVERSOLD
+    has_bb_lower      = close <= float(last["bb_lower"])
+    has_rsi_overbought = rsi > RSI_OVERBOUGHT
+    has_bb_upper      = close >= float(last["bb_upper"])
+
+    if has_rsi_oversold and has_bb_lower and rsi < 30:
+        signals.append(("Extreme oversold", _SIGNAL_CONTRIB["Extreme oversold"]))
+
+    # ── Sobrecompra extrema (techo / catalizador SHORT) ──────────────
+    # RSI > 70 + precio en/sobre BB superior = confluencia de sobrecompra.
+    # Activa señal bajista para posiciones SHORT.
+    if has_rsi_overbought and has_bb_upper and rsi > 70:
+        signals.append(("Extreme overbought", _SIGNAL_CONTRIB["Extreme overbought"]))
+
+    # ── Momentum direccional (triple confirmación — no lo cancela RSI/BB) ─────
+    # ADX fuerte + tendencia daily + MACD histograma en la misma dirección.
+    # Esta señal es la clave para detectar crashes sostenidos donde el RSI
+    # "miente" al ponerse sobrevendido durante la caída continua.
+    macd_hist = float(last["macd_hist"])
+    if adx > 25 and daily["trend"] == "up" and macd_hist > 0:
+        signals.append(("Momentum bull", _SIGNAL_CONTRIB["Momentum bull"]))
+    elif adx > 25 and daily["trend"] == "down" and macd_hist < 0:
+        signals.append(("Momentum bear", _SIGNAL_CONTRIB["Momentum bear"]))
+
+    # ── ROC — Rate of Change puro (independiente de RSI/BB) ──────────────
+    # ROC5 = rendimiento de los últimos 5 cierres
+    # ROC20 = rendimiento de los últimos 20 cierres
+    # Ambas en la misma dirección → confirmación de tendencia de corto plazo.
+    if len(df) >= 21:
+        roc5  = (float(last["Close"]) / float(df["Close"].iloc[-6])  - 1) * 100
+        roc20 = (float(last["Close"]) / float(df["Close"].iloc[-21]) - 1) * 100
+        if roc5 > 0.8 and roc20 > 1.5:
+            signals.append(("ROC up", _SIGNAL_CONTRIB["ROC up"]))
+        elif roc5 < -0.8 and roc20 < -1.5:
+            signals.append(("ROC down", _SIGNAL_CONTRIB["ROC down"]))
+        else:
+            signals.append(("ROC flat", 0.0))
+    else:
+        roc5 = roc20 = 0.0
+        signals.append(("ROC flat", 0.0))
+
+    # ── Filtro de volatilidad (ATR% relativo) — sizing modifier ──────────
+    # No afecta el score de señal, pero devuelve un multiplicador de tamaño.
+    # ATR% < 0.3% → mercado muerto, no operar (size_mult = 0)
+    # ATR% > 3.5% → volatilidad extrema, reducir tamaño (size_mult = 0.5)
+    # Expanding vs histórico → entorno ideal de momentum (size_mult = 1.2)
+    atr_val    = float(last["atr"])
+    atr_pct    = (atr_val / close * 100) if close > 0 else 0.0
+    atr_hist   = float(df["atr"].iloc[-20:].mean()) if len(df) >= 20 else atr_val
+    atr_ratio  = atr_val / (atr_hist + 1e-9)
+
+    if atr_pct < 0.30:
+        vol_size_mult = 0.0   # mercado muerto
+    elif atr_pct > 3.5:
+        vol_size_mult = 0.5   # volatilidad extrema
+    elif atr_ratio > 1.25:
+        vol_size_mult = 1.2   # ATR expandiéndose — momentum óptimo
+    else:
+        vol_size_mult = 1.0
+
+    # ── Ajuste para ETFs inversos (SH, PSQ, SDS, SQQQ) ───────────────
+    # El RSI y BB se invierten: cuando el mercado cae, el ETF sube.
+    # RSI overbought en SH durante crash = señal alcista (seguir comprando).
+    # Las señales de tendencia/momentum/volumen quedan sin cambio.
+    if ticker in INVERSE_ETFS:
+        signals = [
+            (name, -contrib) if name in _INVERSE_INVERT else (name, contrib)
+            for name, contrib in signals
+        ]
+
     # ── Score compuesto ───────────────────────────────────────────────
     raw_score = sum(contrib for _, contrib in signals)
 
     # ADX multiplier: señales en mercados sin tendencia valen menos
-    adx = daily["adx"]
+    # (adx ya extraído arriba junto con daily context)
     if adx < 15:
         adx_mult = 0.60   # muy choppy — señales técnicas poco fiables (era 0.50)
     elif adx < 20:
@@ -298,20 +399,24 @@ def analyze_ticker(ticker: str) -> dict | None:
     score = max(-1.0, min(1.0, raw_score * adx_mult))
 
     return {
-        "ticker":       ticker,
-        "price":        close,
-        "rsi":          round(rsi, 2),
-        "macd":         round(float(last["macd"]), 4),
-        "macd_signal":  round(float(last["macd_signal"]), 4),
-        "bb_pct":       round(float(last["bb_pct"]), 3),
-        "sma_short":    round(float(last["sma_short"]), 2),
-        "sma_long":     round(float(last["sma_long"]), 2),
-        "atr":          round(float(last["atr"]), 4),
-        "vol_ratio":    round(vol_ratio, 2),
-        "daily_trend":  daily["trend"],
-        "daily_sma50":  daily["sma50_pct"],
-        "daily_sma200": daily["sma200_pct"],
-        "adx":          adx,
-        "signals":      signals,
-        "score":        round(score, 4),
+        "ticker":         ticker,
+        "price":          close,
+        "rsi":            round(rsi, 2),
+        "macd":           round(float(last["macd"]), 4),
+        "macd_signal":    round(float(last["macd_signal"]), 4),
+        "bb_pct":         round(float(last["bb_pct"]), 3),
+        "sma_short":      round(float(last["sma_short"]), 2),
+        "sma_long":       round(float(last["sma_long"]), 2),
+        "atr":            round(float(last["atr"]), 4),
+        "atr_pct":        round(atr_pct, 3),
+        "vol_ratio":      round(vol_ratio, 2),
+        "vol_size_mult":  round(vol_size_mult, 2),
+        "roc5":           round(roc5, 3),
+        "roc20":          round(roc20, 3),
+        "daily_trend":    daily["trend"],
+        "daily_sma50":    daily["sma50_pct"],
+        "daily_sma200":   daily["sma200_pct"],
+        "adx":            adx,
+        "signals":        signals,
+        "score":          round(score, 4),
     }

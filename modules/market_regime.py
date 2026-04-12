@@ -1,19 +1,18 @@
 """
-Filtro de régimen de mercado — evita comprar contra la tendencia del mercado.
-
-El mayor error de los bots automáticos es seguir abriendo longs en un mercado
-bajista. Este módulo detecta el estado macro del mercado usando SPY + VIX y
-ajusta el umbral mínimo de señal para abrir posiciones.
+Filtro de régimen de mercado — adapta umbrales según la tendencia macro.
 
 Regímenes:
   BULL    — SPY sobre SMA50 y SMA200, VIX < 20
-              → Operación normal
+              → Operación normal. Favorecer LONG.
   NEUTRAL — SPY entre SMAs o VIX entre 20-30
-              → Subir umbral de señal un 15% (más selectivo)
+              → Más selectivo. LONG y SHORT equilibrados.
   BEAR    — SPY bajo SMA200 O VIX > 30
-              → Subir umbral un 40% (casi bloqueado, solo señales muy fuertes)
+              → Favorecer SHORT. LONG solo con señal muy fuerte.
 
-Cacheado 30 minutos para no sobrecargar yfinance.
+Multiplicadores de umbral (min_score × mult):
+  long_mult:  cuánto subir el umbral para abrir LONG
+  short_mult: cuánto bajar/subir el umbral para abrir SHORT
+  < 1.0 = más fácil entrar | > 1.0 = más difícil entrar
 """
 import logging
 from datetime import datetime, timedelta
@@ -28,7 +27,6 @@ _CACHE_MIN = 30
 
 
 def _download_series(ticker: str, period: str = "6mo") -> pd.Series | None:
-    """Descarga la serie de cierre diario de un ticker."""
     try:
         df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
         if df.empty:
@@ -43,11 +41,14 @@ def _download_series(ticker: str, period: str = "6mo") -> pd.Series | None:
 
 def get_market_regime() -> dict:
     """
-    Retorna el régimen de mercado actual.
+    Retorna el régimen de mercado actual con multiplicadores separados
+    para posiciones LONG y SHORT.
 
     Devuelve:
         regime:         "bull" | "neutral" | "bear"
-        min_score_mult: multiplicador para el umbral mínimo de señal
+        min_score_mult: multiplicador LONG (compatibilidad hacia atrás)
+        long_mult:      multiplicador para abrir LONG
+        short_mult:     multiplicador para abrir SHORT (< 1.0 en BEAR = más fácil cortar)
         detail:         descripción legible
         spy_vs_sma50:   % distancia SPY vs SMA50
         spy_vs_sma200:  % distancia SPY vs SMA200
@@ -64,15 +65,16 @@ def get_market_regime() -> dict:
     spy = _download_series("SPY")
     vix = _download_series("^VIX")
 
-    # Valores por defecto si no hay datos (conservador: neutral)
     if spy is None or len(spy) < 50:
         result = {
-            "regime": "neutral",
-            "min_score_mult": 1.15,
-            "detail": "Sin datos SPY — modo conservador",
-            "spy_vs_sma50": 0.0,
-            "spy_vs_sma200": 0.0,
-            "vix": 20.0,
+            "regime":         "neutral",
+            "min_score_mult": 1.10,
+            "long_mult":      1.10,
+            "short_mult":     1.00,
+            "detail":         "Sin datos SPY — modo conservador",
+            "spy_vs_sma50":   0.0,
+            "spy_vs_sma200":  0.0,
+            "vix":            20.0,
         }
         _cache["regime"] = result
         _cache["updated_at"] = now
@@ -86,10 +88,12 @@ def get_market_regime() -> dict:
     spy_vs_50  = (spy_last / sma50  - 1) * 100
     spy_vs_200 = (spy_last / sma200 - 1) * 100
 
-    # ── Lógica de régimen ─────────────────────────────────────────
     if spy_last < sma200 or vix_last > 30:
-        regime       = "bear"
-        mult         = 1.40
+        regime = "bear"
+        # LONG: umbral sube 20% (más difícil comprar contra la tendencia)
+        # SHORT: umbral baja 35% (umbral agresivo — crash = dirección clara)
+        long_mult  = 1.20
+        short_mult = 0.65
         if spy_last < sma200 and vix_last > 30:
             detail = f"BEAR: SPY bajo SMA200 ({spy_vs_200:+.1f}%) y VIX={vix_last:.0f}"
         elif spy_last < sma200:
@@ -98,24 +102,28 @@ def get_market_regime() -> dict:
             detail = f"BEAR: VIX={vix_last:.0f} (pánico extremo)"
 
     elif vix_last > 20 or spy_last < sma50:
-        regime       = "neutral"
-        mult         = 1.15
+        regime = "neutral"
+        long_mult  = 1.10
+        short_mult = 0.85
         if vix_last > 20:
             detail = f"NEUTRAL: VIX={vix_last:.0f} (incertidumbre), SPY {spy_vs_200:+.1f}% vs SMA200"
         else:
             detail = f"NEUTRAL: SPY bajo SMA50 ({spy_vs_50:+.1f}%) pero sobre SMA200"
 
     else:
-        regime       = "bull"
-        mult         = 1.00
-        detail       = (
+        regime = "bull"
+        long_mult  = 1.00
+        short_mult = 1.25  # más difícil cortar en mercado alcista
+        detail = (
             f"BULL: SPY {spy_vs_50:+.1f}% vs SMA50, "
             f"{spy_vs_200:+.1f}% vs SMA200, VIX={vix_last:.0f}"
         )
 
     result = {
         "regime":         regime,
-        "min_score_mult": mult,
+        "min_score_mult": long_mult,   # compatibilidad hacia atrás
+        "long_mult":      long_mult,
+        "short_mult":     short_mult,
         "detail":         detail,
         "spy_vs_sma50":   round(spy_vs_50, 2),
         "spy_vs_sma200":  round(spy_vs_200, 2),
@@ -125,5 +133,5 @@ def get_market_regime() -> dict:
     _cache["regime"] = result
     _cache["updated_at"] = now
 
-    logger.info(f"Régimen mercado: {detail} | mult={mult}")
+    logger.info(f"Régimen mercado: {detail} | long_mult={long_mult} short_mult={short_mult}")
     return result
